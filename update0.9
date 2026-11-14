@@ -1,4 +1,4 @@
--- Pet Hunt Party / local-source implementation v0.7
+-- Pet Hunt Party / local-source implementation v0.9
 -- No external loaders. Runtime testing in Roblox/Potassium is still required.
 local Players = game:GetService('Players')
 local RS = game:GetService('ReplicatedStorage')
@@ -112,7 +112,7 @@ local window=new('Frame',gui,{Size=UDim2.fromOffset(550,580),Position=UDim2.new(
 local scale=new('UIScale',window,{Scale=1})
 local function resize() local cam=workspace.CurrentCamera;if cam then scale.Scale=math.min(1,(cam.ViewportSize.X-20)/550,(cam.ViewportSize.Y-30)/580) end end
 resize()
-local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.7                         [RSHIFT]',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
+local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.9                         [RSHIFT]',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
 new('Frame',window,{Position=UDim2.fromOffset(8,29),Size=UDim2.new(1,-16,0,1),BorderSizePixel=0,BackgroundColor3=red})
 local status=new('TextLabel',window,{Position=UDim2.new(0,12,1,-57),Size=UDim2.new(1,-24,0,47),Text=startup,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,220),BackgroundTransparency=1})
 local function say(t) if running then status.Text=tostring(t) end end
@@ -142,23 +142,58 @@ local function toggle(p,key,text)
     x=button(p,'',function() config[key]=not config[key];update() end);table.insert(refreshers,update);update()
 end
 local function refresh() for _,fn in ipairs(refreshers) do fn() end end
+local dropdowns={}
+local function registerDropdown(list,trigger)
+    table.insert(dropdowns,{list=list,trigger=trigger})
+    connect(list:GetPropertyChangedSignal('Visible'),function()
+        if list.Visible then for _,d in ipairs(dropdowns) do if d.list~=list then d.list.Visible=false end end end
+    end)
+end
+connect(UIS.InputBegan,function(input)
+    if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch then return end
+    local inset=game:GetService('GuiService'):GetGuiInset()
+    local point=Vector2.new(input.Position.X,input.Position.Y)-inset
+    local function inside(g)
+        return g and point.X>=g.AbsolutePosition.X and point.Y>=g.AbsolutePosition.Y and point.X<=g.AbsolutePosition.X+g.AbsoluteSize.X and point.Y<=g.AbsolutePosition.Y+g.AbsoluteSize.Y
+    end
+    for _,d in ipairs(dropdowns) do if d.list.Visible and not inside(d.list) and not inside(d.trigger) then d.list.Visible=false end end
+end)
 local movementRuntime={}
 do
-    local align,attachment,humanoid,oldRotate
+    local align,orientation,attachment,humanoid,old,heartbeat,goal,smoothed,part,offset
     function movementRuntime.release()
+        if heartbeat then heartbeat:Disconnect();heartbeat=nil end
         if align then align:Destroy();align=nil end
+        if orientation then orientation:Destroy();orientation=nil end
         if attachment then attachment:Destroy();attachment=nil end
-        if humanoid and humanoid.Parent then humanoid.AutoRotate=oldRotate end
-        humanoid=nil
+        if humanoid and humanoid.Parent and old then
+            humanoid.AutoRotate=old.rotate;humanoid.WalkSpeed=old.speed;humanoid.JumpPower=old.power;humanoid.JumpHeight=old.height
+        end
+        humanoid=nil;old=nil;part=nil;offset=nil;goal=nil;smoothed=nil
     end
-    function movementRuntime.hold(r,h,position)
+    function movementRuntime.hold(r,h,position,targetPart)
         if not attachment or attachment.Parent~=r then
-            movementRuntime.release();humanoid=h;oldRotate=h.AutoRotate;h.AutoRotate=false
+            movementRuntime.release();humanoid=h
+            old={rotate=h.AutoRotate,speed=h.WalkSpeed,power=h.JumpPower,height=h.JumpHeight}
+            h.AutoRotate=false;h.WalkSpeed=0;h.JumpPower=0;h.JumpHeight=0;h:Move(Vector3.new())
+            r.AssemblyLinearVelocity=Vector3.new();r.AssemblyAngularVelocity=Vector3.new()
             attachment=Instance.new('Attachment');attachment.Name='PetHuntFarmAttachment';attachment.Parent=r
             align=Instance.new('AlignPosition');align.Name='PetHuntFarmPosition';align.Mode=Enum.PositionAlignmentMode.OneAttachment
-            align.Attachment0=attachment;align.MaxForce=1e9;align.MaxVelocity=100;align.Responsiveness=100;align.Parent=r
+            align.Attachment0=attachment;align.MaxForce=1e9;align.MaxVelocity=40;align.Responsiveness=40;align.RigidityEnabled=true
+            align.Position=position;align.Parent=r
+            orientation=Instance.new('AlignOrientation');orientation.Mode=Enum.OrientationAlignmentMode.OneAttachment;orientation.Attachment0=attachment
+            orientation.RigidityEnabled=true;orientation.MaxTorque=1e9;orientation.CFrame=r.CFrame.Rotation;orientation.Parent=r
+            smoothed=position
+            heartbeat=game:GetService('RunService').Heartbeat:Connect(function(dt)
+                if not running or not r.Parent or not part or not part.Parent or h.Health<=0 then movementRuntime.release();return end
+                local desired=part.Position+offset
+                if (desired-smoothed).Magnitude>.12 then smoothed=smoothed:Lerp(desired,1-math.exp(-12*math.min(dt,.1))) end
+                align.Position=smoothed
+                h:Move(Vector3.new());h.Jump=false
+            end)
         end
-        align.Position=position
+        part=targetPart
+        offset=position-targetPart.Position
     end
 end
 local function input(p,text)
@@ -202,6 +237,7 @@ do
             end
         end
         chosenButton=button(parent,'Monsters: multi-select dropdown v',function() list.Visible=not list.Visible;if list.Visible then rebuild() end end)
+        registerDropdown(list,chosenButton)
         table.insert(refreshers,function()
             local v=settingsForMode();enabled.Text=(v.enabled and '[x] ' or '[ ] ')..'Movement Farm';side.Text='Position: '..v.side..'  >';gap.Text=tostring(v.distance)
             if list.Visible then rebuild() end
@@ -311,6 +347,7 @@ local difficultyOptions=new('Frame',dungeon,{Size=UDim2.new(1,0,0,60),Background
 new('UIListLayout',difficultyOptions,{Padding=UDim.new(0,6)})
 for _,id in ipairs({'normal','hard'}) do button(difficultyOptions,id=='normal' and 'Normal' or 'Hard',function() config.difficulty=id;difficultyOptions.Visible=false;refresh() end) end
 difficultyButton=button(dungeon,'',function() difficultyOptions.Visible=not difficultyOptions.Visible end)
+registerDropdown(modeOptions,modeButton);registerDropdown(difficultyOptions,difficultyButton)
 table.insert(refreshers,function()
     modeButton.Text='Dungeon: '..modeNames[config.dungeonMode]..'  v'
     difficultyButton.Visible=config.dungeonMode=='crypt'
@@ -821,7 +858,12 @@ task.spawn(function()
             movementRuntime.lock=m
             local movement=config.movement[mode]
             if movement and movement.enabled then
-                local position=farmPosition(m.PrimaryPart,m,movement)
+                local movementKey=mode..movement.side..tostring(movement.distance)
+                if movementRuntime.monster~=m or movementRuntime.key~=movementKey then
+                    movementRuntime.offset=farmPosition(m.PrimaryPart,m,movement)-m.PrimaryPart.Position
+                    movementRuntime.monster=m;movementRuntime.key=movementKey
+                end
+                local position=m.PrimaryPart.Position+movementRuntime.offset
                 if lastTarget~=m or lastMovementMode~=mode then
                     -- R is wired to TargetController.setAuto(not auto) in CombatController.
                     -- Set explicit states to avoid toggling in the wrong direction.
@@ -833,7 +875,7 @@ task.spawn(function()
                     target.set(m);target.setAuto(true);target.set(m)
                     lastTarget=m;lastMovementMode=mode;ownsTarget=true
                 elseif target.current~=m then target.set(m) end
-                movementRuntime.hold(r,h,position)
+                movementRuntime.hold(r,h,position,m.PrimaryPart)
             else
                 movementRuntime.release();movementRuntime.lock=nil;lastMovementMode=nil
                 if target.auto then target.setAuto(false) end
