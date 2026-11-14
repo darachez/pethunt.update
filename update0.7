@@ -1,0 +1,853 @@
+-- Pet Hunt Party / local-source implementation v0.7
+-- No external loaders. Runtime testing in Roblox/Potassium is still required.
+local Players = game:GetService('Players')
+local RS = game:GetService('ReplicatedStorage')
+local UIS = game:GetService('UserInputService')
+local Http = game:GetService('HttpService')
+local player = Players.LocalPlayer
+assert(player, 'Run on the client after joining Pet Hunt Party')
+local env = (getgenv and getgenv()) or _G
+if env.PetHuntPartyHub then env.PetHuntPartyHub.stop() end
+local running, connections, activePrompt = true, {}, nil
+local config = {field=false, dungeonCombat=false, movement={}, stage=false, world=false, chest=false, replay=false, autoKeys=false, respawn=false, autoEnter=false, dungeonMode="crypt", difficulty="normal", autoPotion=false, potionBelow=100, potionBatches=5, autoExecute=false, antiAfk=false, rejoin20=false, buyQty=10, skills=false, boss='Nearest', radius=300, position=false, prompt='Auto', returnHome=true}
+local selected, autoProfile, profiles = '', '', {}
+local folder = 'PetHuntParty/' .. tostring(game.PlaceId) .. '/' .. tostring(player.UserId)
+local persistent = type(readfile)=='function' and type(writefile)=='function' and type(isfile)=='function' and type(makefolder)=='function'
+local function connect(signal, fn) local c=signal:Connect(fn); table.insert(connections,c); return c end
+local function bounded(parent,name)
+    local value=parent:WaitForChild(name,12)
+    assert(value,'Missing game object: '..name)
+    return value
+end
+local controllers=bounded(bounded(bounded(player,'PlayerScripts'),'Client'),'Controllers')
+local target=require(bounded(controllers,'TargetController'))
+local combat=require(bounded(controllers,'CombatController'))
+local shared=bounded(RS,'Shared')
+local dungeonsConfig=require(bounded(shared.Config,'Dungeons'))
+local defs=require(bounded(bounded(shared,'Config'),'Monsters')).defs
+local function root()
+    local char=player.Character
+    local h=char and char:FindFirstChildOfClass('Humanoid')
+    local r=char and char:FindFirstChild('HumanoidRootPart')
+    if h and h.Health>0 and r and not r.Anchored then return r,h end
+end
+local function copy(t) return Http:JSONDecode(Http:JSONEncode(t)) end
+local function validate(t)
+    assert(type(t)=='table','Invalid profile')
+    local clean=copy(config)
+    for _,k in ipairs({'stage','world','chest','skills','returnHome'}) do
+        assert(type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]
+    end
+    assert(type(t.boss)=='string' and #t.boss<=120,'Invalid boss');clean.boss=t.boss
+    assert(type(t.prompt)=='string' and #t.prompt<=200,'Invalid prompt');clean.prompt=t.prompt
+    assert(type(t.radius)=='number' and t.radius>=10 and t.radius<=5000,'Invalid radius');clean.radius=t.radius
+    assert(t.replay==nil or type(t.replay)=='boolean','Invalid replay');clean.replay=t.replay==true
+    assert(t.autoKeys==nil or type(t.autoKeys)=='boolean','Invalid autoKeys');clean.autoKeys=t.autoKeys==true
+    local qty=t.buyQty or 10;assert(type(qty)=='number' and qty%1==0 and qty>=1 and qty<=100,'Buy quantity must be 1-100');clean.buyQty=qty
+    assert(t.respawn==nil or type(t.respawn)=='boolean','Invalid respawn');clean.respawn=t.respawn==true
+    for _,k in ipairs({'autoEnter','autoPotion','autoExecute','antiAfk','rejoin20'}) do
+        assert(t[k]==nil or type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]==true
+    end
+    clean.dungeonMode=t.dungeonMode or 'crypt';assert(clean.dungeonMode=='crypt' or clean.dungeonMode=='endless' or clean.dungeonMode=='gold','Invalid dungeon mode')
+    clean.difficulty=t.difficulty or 'normal';assert(clean.difficulty=='normal' or clean.difficulty=='hard','Invalid difficulty')
+    clean.potionBelow=t.potionBelow or 100;assert(type(clean.potionBelow)=='number' and clean.potionBelow%1==0 and clean.potionBelow>=1 and clean.potionBelow<=100000,'Invalid potion threshold')
+    clean.potionBatches=t.potionBatches or 5;assert(type(clean.potionBatches)=='number' and clean.potionBatches%1==0 and clean.potionBatches>=1 and clean.potionBatches<=100,'Invalid potion batches')
+    for _,k in ipairs({'field','dungeonCombat'}) do assert(t[k]==nil or type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]==true end
+    clean.movement={}
+    for _,mode in ipairs({'field','stage','world','dungeon'}) do
+        local m=(type(t.movement)=='table' and t.movement[mode]) or {}
+        assert(type(m)=='table','Invalid movement')
+        local side=m.side or 'Behind';assert(side=='Front' or side=='Below' or side=='Above' or side=='Behind','Invalid position')
+        local distance=m.distance or 3;assert(type(distance)=='number' and distance>=0 and distance<=100,'Distance must be 0-100')
+        local chosen=m.selected or {};assert(type(chosen)=='table','Invalid monster selection')
+        for id,on in pairs(chosen) do assert(type(id)=='string' and type(on)=='boolean','Invalid monster choice') end
+        clean.movement[mode]={enabled=m.enabled==true,side=side,distance=distance,selected=copy(chosen)}
+    end
+    clean.position=false
+    if t.position then
+        assert(type(t.position)=='table' and t.position.place==game.PlaceId,'Position is for a different place')
+        assert(type(t.position.cf)=='table' and #t.position.cf==12,'Invalid position')
+        for _,n in ipairs(t.position.cf) do assert(type(n)=='number' and n==n and math.abs(n)<1e8,'Invalid coordinate') end
+        clean.position=copy(t.position)
+    end
+    return clean
+end
+local function safeName(s) return type(s)=='string' and #s>0 and #s<=40 and s:match('^[%w_-]+$') end
+local function saveIndex()
+    if persistent then writefile(folder..'/index.json',Http:JSONEncode({version=1,names=profiles,autoload=autoProfile})) end
+end
+local startup='Ready'
+if persistent then
+    local ok,err=pcall(function()
+        for _,p in ipairs({'PetHuntParty','PetHuntParty/'..game.PlaceId,folder}) do
+            if not isfolder or not isfolder(p) then pcall(makefolder,p) end
+        end
+        if isfile(folder..'/index.json') then
+            local idx=Http:JSONDecode(readfile(folder..'/index.json'))
+            assert(idx.version==1 and type(idx.names)=='table','Invalid config index')
+            for _,name in ipairs(idx.names) do if safeName(name) then table.insert(profiles,name) end end
+            if safeName(idx.autoload) and table.find(profiles,idx.autoload) then
+                autoProfile=idx.autoload
+                config=validate(Http:JSONDecode(readfile(folder..'/'..autoProfile..'.json')))
+                selected=autoProfile;startup='Auto loaded: '..selected
+            end
+        end
+    end)
+    if not ok then startup='Config error: '..tostring(err); config.stage=false;config.world=false;config.chest=false end
+else startup='File API unavailable: profiles last this session only' end
+if env.PetHuntResumeConfig then
+    local ok,value=pcall(validate,env.PetHuntResumeConfig);env.PetHuntResumeConfig=nil
+    if ok then config=value;startup='Resumed after teleport' else startup='Resume config invalid' end
+end
+local memory={}
+local gui=Instance.new('ScreenGui');gui.Name='PetHuntPartyHub';gui.ResetOnSpawn=false;gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling;gui.Parent=bounded(player,'PlayerGui')
+local function new(class,parent,props)
+    local x=Instance.new(class)
+    for k,v in pairs(props or {}) do x[k]=v end
+    x.Parent=parent;return x
+end
+local black=Color3.fromRGB(15,15,17)
+local red=Color3.fromRGB(180,35,47)
+local window=new('Frame',gui,{Size=UDim2.fromOffset(550,580),Position=UDim2.new(.5,-275,.5,-290),BackgroundColor3=black,BorderColor3=Color3.fromRGB(150,150,150),Active=true})
+local scale=new('UIScale',window,{Scale=1})
+local function resize() local cam=workspace.CurrentCamera;if cam then scale.Scale=math.min(1,(cam.ViewportSize.X-20)/550,(cam.ViewportSize.Y-30)/580) end end
+resize()
+local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.7                         [RSHIFT]',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
+new('Frame',window,{Position=UDim2.fromOffset(8,29),Size=UDim2.new(1,-16,0,1),BorderSizePixel=0,BackgroundColor3=red})
+local status=new('TextLabel',window,{Position=UDim2.new(0,12,1,-57),Size=UDim2.new(1,-24,0,47),Text=startup,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,220),BackgroundTransparency=1})
+local function say(t) if running then status.Text=tostring(t) end end
+local function guard(fn) return function() local ok,e=pcall(fn);if not ok then say('Error: '..tostring(e)) end end end
+local function button(parent,text,fn)
+    local b=new('TextButton',parent,{Text=text,Size=UDim2.new(1,0,0,25),BackgroundColor3=Color3.fromRGB(23,23,25),BorderColor3=Color3.fromRGB(65,65,65),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.fromRGB(235,235,235)})
+    connect(b.Activated,guard(fn));return b
+end
+local function page()
+    local p=new('ScrollingFrame',window,{Position=UDim2.fromOffset(14,73),Size=UDim2.new(1,-28,1,-139),BackgroundTransparency=1,BorderColor3=Color3.fromRGB(60,60,60),CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Visible=false})
+    new('UIPadding',p,{PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingTop=UDim.new(0,8),PaddingBottom=UDim.new(0,8)})
+    new('UIListLayout',p,{Padding=UDim.new(0,7),SortOrder=Enum.SortOrder.LayoutOrder})
+    return p
+end
+local farm,dungeon,settings=page(),page(),page();farm.Visible=true
+local tabs=new('Frame',window,{Position=UDim2.fromOffset(14,39),Size=UDim2.new(1,-28,0,25),BackgroundTransparency=1})
+local a=button(tabs,'Farm',function() farm.Visible=true;dungeon.Visible=false;settings.Visible=false end);a.Size=UDim2.fromOffset(90,25)
+local b=button(tabs,'Settings',function() farm.Visible=false;dungeon.Visible=false;settings.Visible=true end);b.Size=UDim2.fromOffset(100,25);b.Position=UDim2.fromOffset(278,0)
+local dtab=button(tabs,'Auto Farm Dungeon',function() farm.Visible=false;dungeon.Visible=true;settings.Visible=false end);dtab.Size=UDim2.fromOffset(176,25);dtab.Position=UDim2.fromOffset(96,0)
+local function label(p,text)
+    return new('TextLabel',p,{Size=UDim2.new(1,0,0,23),Text=text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextColor3=Color3.fromRGB(225,110,120),Font=Enum.Font.Code,TextSize=13})
+end
+local refreshers={}
+local function toggle(p,key,text)
+    local x
+    local function update() x.Text=(config[key] and '[x] ' or '[ ] ')..text end
+    x=button(p,'',function() config[key]=not config[key];update() end);table.insert(refreshers,update);update()
+end
+local function refresh() for _,fn in ipairs(refreshers) do fn() end end
+local movementRuntime={}
+do
+    local align,attachment,humanoid,oldRotate
+    function movementRuntime.release()
+        if align then align:Destroy();align=nil end
+        if attachment then attachment:Destroy();attachment=nil end
+        if humanoid and humanoid.Parent then humanoid.AutoRotate=oldRotate end
+        humanoid=nil
+    end
+    function movementRuntime.hold(r,h,position)
+        if not attachment or attachment.Parent~=r then
+            movementRuntime.release();humanoid=h;oldRotate=h.AutoRotate;h.AutoRotate=false
+            attachment=Instance.new('Attachment');attachment.Name='PetHuntFarmAttachment';attachment.Parent=r
+            align=Instance.new('AlignPosition');align.Name='PetHuntFarmPosition';align.Mode=Enum.PositionAlignmentMode.OneAttachment
+            align.Attachment0=attachment;align.MaxForce=1e9;align.MaxVelocity=100;align.Responsiveness=100;align.Parent=r
+        end
+        align.Position=position
+    end
+end
+local function input(p,text)
+    return new('TextBox',p,{Size=UDim2.new(1,0,0,26),Text=text,PlaceholderText=text,ClearTextOnFocus=false,Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundColor3=Color3.fromRGB(22,22,24),BorderColor3=Color3.fromRGB(65,65,65)})
+end
+do
+    local function movementPanel(parent,mode,title)
+        if not config.movement[mode] then config.movement[mode]={enabled=false,side='Behind',distance=3,selected={}} end
+        local function settingsForMode()
+            config.movement=config.movement or {}
+            config.movement[mode]=config.movement[mode] or {enabled=false,side='Behind',distance=3,selected={}}
+            return config.movement[mode]
+        end
+        label(parent,'-- '..title..' / Movement --')
+        local enabled,side,chosenButton
+        enabled=button(parent,'',function() local v=settingsForMode();v.enabled=not v.enabled;refresh() end)
+        local sides={'Front','Below','Above','Behind'}
+        side=button(parent,'',function() local v=settingsForMode();v.side=sides[((table.find(sides,v.side) or 0)%4)+1];refresh() end)
+        label(parent,'Gap from monster edge (studs, 0-100)')
+        local gap=input(parent,tostring(settingsForMode().distance))
+        connect(gap.FocusLost,guard(function() local n=tonumber(gap.Text);assert(n and n>=0 and n<=100,'Distance must be 0-100');settingsForMode().distance=n end))
+        local list=new('ScrollingFrame',parent,{Size=UDim2.new(1,0,0,180),BackgroundColor3=black,BorderColor3=red,Visible=false,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=5})
+        new('UIListLayout',list,{Padding=UDim.new(0,5),SortOrder=Enum.SortOrder.Name})
+        local function rebuild()
+            for _,c in ipairs(list:GetChildren()) do if c:IsA('TextButton') then c:Destroy() end end
+            local ids={}
+            for id,d in pairs(defs) do
+                local include=mode=='dungeon' and d.dungeon~=nil or mode=='stage' and d.role=='boss' and not d.dungeonBoss or mode=='field' and d.role~='boss' and not d.dungeon or mode=='world'
+                if include then table.insert(ids,id) end
+            end
+            -- Include current replicated models even when config metadata differs.
+            local monsters=workspace:FindFirstChild('Monsters')
+            if monsters then for _,m in ipairs(monsters:GetChildren()) do local id=m:GetAttribute('MonsterId');if id and not table.find(ids,id) then table.insert(ids,id) end end end
+            if #ids==0 then for id in pairs(defs) do table.insert(ids,id) end end
+            table.sort(ids)
+            local all=button(list,'Clear selection (all eligible monsters)',function() settingsForMode().selected={};rebuild() end);all.Name='000'
+            for _,id in ipairs(ids) do
+                local d=defs[id];local text=(d and d.name or id)..' ['..id..']'
+                local row=button(list,(settingsForMode().selected[id] and '[x] ' or '[ ] ')..text,function() local v=settingsForMode();v.selected[id]=not v.selected[id];rebuild() end)
+                row.Name=id
+            end
+        end
+        chosenButton=button(parent,'Monsters: multi-select dropdown v',function() list.Visible=not list.Visible;if list.Visible then rebuild() end end)
+        table.insert(refreshers,function()
+            local v=settingsForMode();enabled.Text=(v.enabled and '[x] ' or '[ ] ')..'Movement Farm';side.Text='Position: '..v.side..'  >';gap.Text=tostring(v.distance)
+            if list.Visible then rebuild() end
+        end)
+    end
+    toggle(farm,'field','Auto Farm Selected Monsters')
+    movementPanel(farm,'field','Monsters')
+    movementPanel(farm,'stage','Boss Stage')
+    movementPanel(farm,'world','World Boss')
+    toggle(dungeon,'dungeonCombat','Auto Farm Dungeon Monsters')
+    movementPanel(dungeon,'dungeon','Dungeon')
+end
+
+label(farm,'-- Boss automation --')
+toggle(farm,'stage','Auto Farm Boss Stage')
+toggle(farm,'world','Auto Farm World Boss (priority)')
+toggle(farm,'skills','Use unlocked skills 1-4 (may spend SP / Gold)')
+local bosses={'Nearest'}
+for id,d in pairs(defs) do if d.role=='boss' and not d.dungeonBoss then table.insert(bosses,id) end end
+table.sort(bosses,function(x,y) if x=='Nearest' then return true elseif y=='Nearest' then return false else return x<y end end)
+local bossButton
+bossButton=button(farm,'',function() config.boss=bosses[((table.find(bosses,config.boss) or 0)%#bosses)+1];refresh() end)
+table.insert(refreshers,function() bossButton.Text='Stage boss: '..config.boss..'  >' end)
+label(farm,'Stage search radius around saved point (studs)')
+local radius=input(farm,tostring(config.radius))
+connect(radius.FocusLost,guard(function() local n=tonumber(radius.Text);assert(n and n>=10 and n<=5000,'Radius must be 10-5000');config.radius=n end))
+table.insert(refreshers,function() radius.Text=tostring(config.radius) end)
+label(farm,'-- Farm position --')
+button(farm,'Save Current Position',function()
+    local r=root();assert(r,'Character is not ready')
+    assert(not player:GetAttribute('DungeonRun'),'Save a field position outside a dungeon')
+    config.position={place=game.PlaceId,cf={r.CFrame:GetComponents()}};say('Position captured. Save Config to keep it across sessions.')
+end)
+local function goHome()
+    assert(config.position and config.position.place==game.PlaceId,'No position saved for this place')
+    assert(not player:GetAttribute('DungeonRun'),'Return is disabled inside a dungeon')
+    local r=root();assert(r,'Character is not ready');r.CFrame=CFrame.new(table.unpack(config.position.cf))
+end
+button(farm,'Return to Saved Position',goHome)
+toggle(farm,'returnHome','Return after World Boss')
+local keyBusy,keyLastCount,keyLastAttempt=false,nil,-math.huge
+local keyMessage='Ready'
+local function keyCount()
+    local inv=player:FindFirstChild('Inventory')
+    local count=inv and inv:GetAttribute(dungeonsConfig.keyItem)
+    if type(count)=='number' then return count end
+    return nil
+end
+local function validQuantity(n)
+    return type(n)=='number' and n==n and n%1==0 and n>=1 and n<=100
+end
+local function shouldBuyKeys(count,previous)
+    return count~=nil and count<=5 and (previous==nil or count<previous)
+end
+local function purchaseKeys(quantity,automatic)
+    assert(validQuantity(quantity),'Buy quantity must be 1-100')
+    assert(not keyBusy,'A key purchase is already running')
+    keyBusy=true;keyLastAttempt=os.clock()
+    task.spawn(function()
+        local purchased=0
+        local ok,err=pcall(function()
+            local remote=bounded(bounded(RS,'Remotes'),'Dungeon')
+            for i=1,quantity do
+                if not running or (automatic and not config.autoKeys) then break end
+                local gold=player:GetAttribute('Gold')
+                if type(gold)=='number' and gold<(dungeonsConfig.keyPrice or 0) then
+                    keyMessage='Not enough Gold';break
+                end
+                -- The game's Buy key button sends one buyKey request per key.
+                local response=remote:InvokeServer('buyKey')
+                if not running then return end
+                if type(response)~='table' or response.ok~=true then
+                    keyMessage='Server refused buyKey: '..tostring(type(response)=='table' and (response.error or response.message or response.reason) or response)
+                    break
+                end
+                purchased=purchased+1
+                keyMessage=('Bought %d/%d keys'):format(purchased,quantity)
+                task.wait(.35)
+            end
+        end)
+        keyBusy=false
+        if not running then return end
+        if not ok then keyMessage='Buy error: '..tostring(err) end
+        if purchased==quantity then keyMessage=('Purchased %d keys'):format(purchased) end
+        -- Do not repeat a batch just because it leaves inventory at <=5.
+        -- Re-arm after the next consumed key, or a 30-second retry after failure.
+        keyLastCount=purchased==quantity and keyCount() or nil
+        say(keyMessage)
+    end)
+end
+label(dungeon,'-- Auto Enter Dungeon --')
+toggle(dungeon,'autoEnter','Auto Enter Dungeon (remote)')
+local modeButton,difficultyButton
+local modeNames={crypt="Grim Antler's Crypt",gold='Golden Vault [unavailable]',endless='Endless Tower'}
+local modeList={'crypt','gold','endless'}
+local modeOptions=new('Frame',dungeon,{Size=UDim2.new(1,0,0,95),BackgroundTransparency=1,Visible=false})
+new('UIListLayout',modeOptions,{Padding=UDim.new(0,6)})
+for _,id in ipairs(modeList) do
+    local choice=button(modeOptions,modeNames[id],function()
+        if id=='gold' then say('Golden Vault is not enabled');return end
+        config.dungeonMode=id;modeOptions.Visible=false;refresh()
+    end)
+    if id=='gold' then choice.TextColor3=Color3.fromRGB(100,100,100);choice.Active=false end
+end
+modeButton=button(dungeon,'',function() modeOptions.Visible=not modeOptions.Visible end)
+local difficultyOptions=new('Frame',dungeon,{Size=UDim2.new(1,0,0,60),BackgroundTransparency=1,Visible=false})
+new('UIListLayout',difficultyOptions,{Padding=UDim.new(0,6)})
+for _,id in ipairs({'normal','hard'}) do button(difficultyOptions,id=='normal' and 'Normal' or 'Hard',function() config.difficulty=id;difficultyOptions.Visible=false;refresh() end) end
+difficultyButton=button(dungeon,'',function() difficultyOptions.Visible=not difficultyOptions.Visible end)
+table.insert(refreshers,function()
+    modeButton.Text='Dungeon: '..modeNames[config.dungeonMode]..'  v'
+    difficultyButton.Visible=config.dungeonMode=='crypt'
+    difficultyButton.Text='Difficulty: '..config.difficulty..'  v'
+    if config.dungeonMode~='crypt' then difficultyOptions.Visible=false end
+end)
+local enterDisplay=label(dungeon,'Entry: Off')
+local function entryArgs(mode,difficulty)
+    if mode=='crypt' and (difficulty=='normal' or difficulty=='hard') then return 'crypt',difficulty end
+    if mode=='endless' then return 'endless','ranked' end
+end
+local enterBusy,lastEnter=false,-math.huge
+local function stepEnter()
+    if not config.autoEnter then enterDisplay.Text='Entry: Off';return end
+    if player:GetAttribute('DungeonRun') then enterDisplay.Text='Entry: already inside dungeon';return end
+    local r=root();if not r or keyBusy then return end
+    if (player:GetAttribute('DownUntil') or 0)>workspace:GetServerTimeNow() then return end
+    local mode,diff=entryArgs(config.dungeonMode,config.difficulty)
+    if not mode then enterDisplay.Text='Entry: selected mode unavailable';return end
+    if enterBusy or os.clock()-lastEnter<10 then return end
+    enterBusy=true;lastEnter=os.clock();enterDisplay.Text='Entry: requesting '..mode..' / '..diff
+    task.spawn(function()
+        local ok,result=pcall(function() return bounded(bounded(RS,'Remotes'),'Dungeon'):InvokeServer('enter',mode,diff) end)
+        enterBusy=false
+        if not running then return end
+        enterDisplay.Text=ok and type(result)=='table' and result.ok and 'Entry accepted / waiting for party or loading' or ('Entry refused: '..tostring(ok and type(result)=='table' and (result.error or result.message) or result))
+    end)
+end
+label(dungeon,'-- White Potion --')
+toggle(dungeon,'autoPotion','Auto Buy White Potion')
+local potionDisplay=label(dungeon,'White Potion: loading...')
+label(dungeon,'Buy when count is BELOW this number')
+local potionBelow=input(dungeon,tostring(config.potionBelow))
+label(dungeon,'Purchase batches (99 bottles per batch)')
+local potionBatches=input(dungeon,tostring(config.potionBatches))
+local function whole(n,low,high) return type(n)=='number' and n%1==0 and n>=low and n<=high end
+connect(potionBelow.FocusLost,guard(function() local n=tonumber(potionBelow.Text);assert(whole(n,1,100000),'Threshold must be 1-100000');config.potionBelow=n end))
+connect(potionBatches.FocusLost,guard(function() local n=tonumber(potionBatches.Text);assert(whole(n,1,100),'Batches must be 1-100');config.potionBatches=n end))
+table.insert(refreshers,function() potionBelow.Text=tostring(config.potionBelow);potionBatches.Text=tostring(config.potionBatches) end)
+local potionBusy,potionLast,potionAttempt=false,nil,-math.huge
+local potionMessage='Ready'
+local function potionDue(count,threshold,last) return type(count)=='number' and count<threshold and (last==nil or count<last) end
+local function stepPotion()
+    local inv=player:FindFirstChild('Inventory');local count=inv and inv:GetAttribute('white_potion')
+    potionDisplay.Text='White Potion: '..tostring(count or '?')..' | '..potionMessage
+    if not config.autoPotion then potionLast=nil;return end
+    if potionBusy or not potionDue(count,config.potionBelow,potionLast) or os.clock()-potionAttempt<30 then return end
+    potionBusy=true;potionAttempt=os.clock()
+    local batches=config.potionBatches
+    task.spawn(function()
+        local bought=0
+        local ok,err=pcall(function()
+            for i=1,batches do
+                if not running or not config.autoPotion then break end
+                local result=bounded(bounded(RS,'Remotes'),'Shop'):InvokeServer('buy','white_potion',99)
+                if not running then return end
+                if type(result)~='table' or not result.ok then potionMessage='Refused: '..tostring(type(result)=='table' and (result.error or result.message) or result);break end
+                bought=bought+1;potionMessage=('Purchased %d/%d bottles'):format(bought*99,batches*99)
+                task.wait(.4)
+            end
+        end)
+        potionBusy=false
+        if not running then return end
+        if not ok then potionMessage=tostring(err) end
+        potionLast=bought==batches and inv:GetAttribute('white_potion') or nil
+    end)
+end
+
+label(dungeon,'-- Dungeon Keys --')
+local keyDisplay=label(dungeon,'Keys: loading inventory...')
+toggle(dungeon,'autoKeys','Auto Buy Keys when inventory <= 5')
+label(dungeon,'Keys to buy per batch (1-100)')
+local keyQty=input(dungeon,tostring(config.buyQty))
+connect(keyQty.FocusLost,guard(function()
+    local n=tonumber(keyQty.Text);assert(validQuantity(n),'Buy quantity must be 1-100');config.buyQty=n
+end))
+table.insert(refreshers,function() keyQty.Text=tostring(config.buyQty) end)
+local keyOverlay=new('Frame',window,{Size=UDim2.new(1,-40,0,230),Position=UDim2.fromOffset(20,150),BackgroundColor3=black,BorderColor3=red,Visible=false,ZIndex=100})
+new('UIPadding',keyOverlay,{PaddingLeft=UDim.new(0,12),PaddingRight=UDim.new(0,12),PaddingTop=UDim.new(0,12)})
+new('UIListLayout',keyOverlay,{Padding=UDim.new(0,10),SortOrder=Enum.SortOrder.LayoutOrder})
+local popupTitle=label(keyOverlay,'Buy Dungeon Keys');popupTitle.ZIndex=101
+local popupCount=label(keyOverlay,'');popupCount.ZIndex=101
+local popupQty=input(keyOverlay,tostring(config.buyQty));popupQty.ZIndex=101
+local priceLabel=label(keyOverlay,'');priceLabel.ZIndex=101
+local function updatePrice()
+    local n=tonumber(popupQty.Text)
+    priceLabel.Text=validQuantity(n) and ('Estimated Gold: '..tostring(n*(dungeonsConfig.keyPrice or 0))) or 'Enter a whole number from 1 to 100'
+end
+connect(popupQty:GetPropertyChangedSignal('Text'),updatePrice)
+local buyButton=button(keyOverlay,'Buy Keys',function()
+    local n=tonumber(popupQty.Text);assert(validQuantity(n),'Buy quantity must be 1-100')
+    purchaseKeys(n,false)
+end);buyButton.ZIndex=101
+local closeBuy=button(keyOverlay,'Close',function() keyOverlay.Visible=false end);closeBuy.ZIndex=101
+button(dungeon,'Open Buy Keys Popup (anywhere)',function()
+    popupQty.Text=tostring(config.buyQty);updatePrice();keyOverlay.Visible=true
+end)
+local function stepKeys()
+    local count=keyCount()
+    local text='Dungeon Keys: '..(count~=nil and tostring(count) or 'inventory unavailable')
+    keyDisplay.Text=text;popupCount.Text=text..' | '..keyMessage
+    buyButton.Active=not keyBusy;buyButton.Text=keyBusy and 'Buying...' or 'Buy Keys'
+    if not config.autoKeys then keyLastCount=nil;return end
+    if keyBusy or count==nil then return end
+    if shouldBuyKeys(count,keyLastCount) and os.clock()-keyLastAttempt>=30 then
+        purchaseKeys(config.buyQty,true)
+    elseif count>5 then keyLastCount=nil end
+end
+
+label(dungeon,'-- Auto Farm Dungeon --')
+toggle(dungeon,'respawn','Auto Respawn when knocked out / HP = 0')
+local respawnDisplay=label(dungeon,'Respawn: Off')
+toggle(dungeon,'chest','Open Boss Chest (Hold E)')
+toggle(dungeon,'replay','Auto Replay after chest opens (3 seconds)')
+label(dungeon,'Replay waits for server confirmation + visible popup')
+local promptChoices={'Auto'}
+local function promptKey(p) return p:GetFullName() end
+button(dungeon,'Refresh Chest Prompts (while chest exists)',function()
+    promptChoices={'Auto'}
+    for _,p in ipairs(workspace:GetDescendants()) do if p:IsA('ProximityPrompt') and p.Enabled then table.insert(promptChoices,promptKey(p)) end end
+    table.sort(promptChoices);say('Found '..(#promptChoices-1)..' prompts. Select the chest only.')
+end)
+local promptButton
+promptButton=button(dungeon,'',function() config.prompt=promptChoices[((table.find(promptChoices,config.prompt) or 0)%#promptChoices)+1];refresh() end)
+table.insert(refreshers,function() promptButton.Text='Chest prompt: '..config.prompt end)
+label(settings,'-- Config profiles --')
+local name=input(settings,'');name.PlaceholderText='Profile name: letters, numbers, _ or -'
+local selectButton,autoButton
+local function loadProfile(n)
+    assert(safeName(n),'Select a profile first')
+    local t=persistent and Http:JSONDecode(readfile(folder..'/'..n..'.json')) or memory[n]
+    config=validate(t);selected=n;refresh();say('Loaded: '..n)
+end
+selectButton=button(settings,'',function()
+    assert(#profiles>0,'Create a profile first')
+    loadProfile(profiles[((table.find(profiles,selected) or 0)%#profiles)+1])
+end)
+local function writeProfile(n)
+    local t=validate(config)
+    if persistent then writefile(folder..'/'..n..'.json',Http:JSONEncode(t)) else memory[n]=copy(t) end
+end
+button(settings,'Create Config',function()
+    local n=name.Text;assert(safeName(n),'Use 1-40 letters, numbers, _ or -');assert(not table.find(profiles,n),'Profile already exists')
+    writeProfile(n);table.insert(profiles,n);selected=n;saveIndex();refresh();say('Created: '..n)
+end)
+button(settings,'Save Config',function() assert(safeName(selected),'Select or create a profile first');writeProfile(selected);say('Saved: '..selected) end)
+button(settings,'Load Selected Config',function() loadProfile(selected) end)
+autoButton=button(settings,'',function()
+    assert(safeName(selected),'Select or create a profile first')
+    autoProfile=autoProfile==selected and '' or selected;saveIndex();refresh();say('Auto Load: '..(autoProfile~='' and autoProfile or 'Off'))
+end)
+table.insert(refreshers,function() selectButton.Text='Select Config: '..(selected~='' and selected or 'none')..'  >';autoButton.Text='Auto Load: '..(autoProfile~='' and autoProfile or 'Off') end)
+label(settings,persistent and 'Storage: persistent / per account and place' or 'Storage: session only (file API unavailable)')
+label(settings,'-- Session --')
+toggle(settings,'autoExecute','Auto Execute after teleport / restart')
+toggle(settings,'antiAfk','Anti AFK')
+toggle(settings,'rejoin20','Rejoin every 20 minutes')
+local sessionDisplay=label(settings,'Session: checking executor support')
+local sessionStep
+-- Scoped to keep Lua's active local-variable count below the limit.
+do
+    local teleport=game:GetService('TeleportService')
+    local queued=false
+    local rejoinAt=os.clock()+1200
+    local pendingAt=nil
+    local queueFunction=queue_on_teleport or queueonteleport or (syn and syn.queue_on_teleport) or (delta and delta.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    local function queueResume()
+        if not config.autoExecute or queued then return end
+        assert(type(queueFunction)=='function','Executor has no queue_on_teleport API')
+        local source=env.PetHuntSource
+        if not source and type(readfile)=='function' then local ok,text=pcall(readfile,'PetHuntParty.lua');if ok then source=text end end
+        assert(type(source)=='string' and #source>100,'Place PetHuntParty.lua in executor workspace and run START.lua')
+        local saved=Http:JSONEncode(validate(config))
+        local bootstrap=("repeat task.wait(.5) until game:IsLoaded() and game:GetService('Players').LocalPlayer; local e=(getgenv and getgenv()) or _G; e.PetHuntResumeConfig=game:GetService('HttpService'):JSONDecode(%q); e.PetHuntSource=%q; local f,err=loadstring(e.PetHuntSource); assert(f,err); f()"):format(saved,source)
+        queueFunction(bootstrap);queued=true
+    end
+    connect(player.OnTeleport,function(state)
+        if state==Enum.TeleportState.Started or state==Enum.TeleportState.InProgress then
+            local ok,err=pcall(queueResume);if not ok then say('Auto Execute: '..tostring(err)) end
+        elseif state==Enum.TeleportState.Failed then queued=false;pendingAt=nil;rejoinAt=os.clock()+30 end
+    end)
+    connect(teleport.TeleportInitFailed,function(who)
+        if who==player then queued=false;pendingAt=nil;rejoinAt=os.clock()+30 end
+    end)
+    connect(player.Idled,function()
+        if not config.antiAfk then return end
+        local ok,err=pcall(function() local v=game:GetService('VirtualUser');v:CaptureController();v:ClickButton2(Vector2.new(0,0)) end)
+        if not ok then say('Anti AFK unavailable: '..tostring(err)) end
+    end)
+    sessionStep=function()
+        local remaining=math.max(0,math.ceil(rejoinAt-os.clock()))
+        sessionDisplay.Text=('Rejoin: %s | Auto Execute: %s'):format(config.rejoin20 and (remaining..'s') or 'Off',config.autoExecute and (type(queueFunction)=='function' and 'Ready (START.lua required)' or 'API unavailable') or 'Off')
+        if not config.rejoin20 then rejoinAt=os.clock()+1200;return end
+        if pendingAt then
+            if os.clock()-pendingAt>30 then pendingAt=nil;queued=false;rejoinAt=os.clock()+30 end
+            return
+        end
+        if os.clock()<rejoinAt then return end
+        local ok,err=pcall(function()
+            if config.autoExecute then queueResume() end
+            pendingAt=os.clock()
+            bounded(bounded(RS,'Remotes'),'Rejoin'):FireServer(target.auto==true)
+        end)
+        if not ok then pendingAt=nil;rejoinAt=os.clock()+30;say('Rejoin: '..tostring(err)) end
+    end
+end
+
+label(settings,'RSHIFT: show / hide | Drag title to move')
+local function releasePrompt() if activePrompt then pcall(function() activePrompt:InputHoldEnd() end);activePrompt=nil end end
+local function stop()
+    if not running then return end
+    running=false;releasePrompt();movementRuntime.release();pcall(function() target.setAuto(false) end)
+    for _,c in ipairs(connections) do c:Disconnect() end
+    pcall(function() target.set(nil) end)
+    local r,h=root();if r then h:MoveTo(r.Position) end
+    gui:Destroy();if env.PetHuntPartyHub and env.PetHuntPartyHub.stop==stop then env.PetHuntPartyHub=nil end
+end
+env.PetHuntPartyHub={stop=stop}
+button(settings,'Unload',stop)
+local mobileToggle=button(gui,'Pet Hunt',function() window.Visible=not window.Visible;resize() end)
+mobileToggle.Size=UDim2.fromOffset(90,32);mobileToggle.Position=UDim2.new(1,-100,0,12)
+local dragging,startMouse,startPos
+connect(title.InputBegan,function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=true;startMouse=i.Position;startPos=window.Position end end)
+connect(UIS.InputEnded,function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then dragging=false end end)
+connect(UIS.InputChanged,function(i) if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then local d=(i.Position-startMouse)/scale.Scale;window.Position=startPos+UDim2.fromOffset(d.X,d.Y) end end)
+connect(UIS.InputBegan,function(i,processed) if not processed and i.KeyCode==Enum.KeyCode.RightShift then window.Visible=not window.Visible;resize() end end)
+refresh()
+local function alive(m) return m and m.Parent and m:IsA('Model') and m.PrimaryPart and (m:GetAttribute('Health') or 0)>0 end
+local function eligibleSelection(mode,m)
+    local movement=config.movement[mode]
+    local chosen=movement and movement.selected or {}
+    local any=false;for _,on in pairs(chosen) do if on then any=true;break end end
+    return not any or chosen[m:GetAttribute('MonsterId')]==true
+end
+local function choose(r)
+    local folder=workspace:FindFirstChild('Monsters');if not folder then return end
+    local candidates={};local inDungeon=player:GetAttribute('DungeonRun')
+    local origin=config.position and Vector3.new(table.unpack(config.position.cf,1,3)) or r.Position
+    for _,m in ipairs(folder:GetChildren()) do
+        if alive(m) then
+            local dist=(r.Position-m.PrimaryPart.Position).Magnitude
+            local id=m:GetAttribute('MonsterId');local d=defs[id];local mode
+            if inDungeon then
+                if config.dungeonCombat and dist<=350 then mode='dungeon' end
+            elseif m:GetAttribute('WorldBoss') then
+                if config.world then mode='world' end
+            elseif d and d.role=='boss' and not d.dungeonBoss then
+                if config.stage and (config.boss=='Nearest' or id==config.boss) and (origin-m.PrimaryPart.Position).Magnitude<=config.radius then mode='stage' end
+            elseif config.field and d and not d.dungeonBoss and (origin-m.PrimaryPart.Position).Magnitude<=config.radius then mode='field' end
+            if mode and eligibleSelection(mode,m) then
+                local rank=mode=='world' and 0 or mode=='stage' and 1 or 2
+                table.insert(candidates,{m=m,mode=mode,rank=rank,dist=dist})
+            end
+        end
+    end
+    table.sort(candidates,function(a,b)
+        if a.rank~=b.rank then return a.rank<b.rank end
+        -- Stay on the current selected monster until it dies.
+        if a.m==movementRuntime.lock then return true elseif b.m==movementRuntime.lock then return false end
+        return a.dist<b.dist
+    end)
+    local c=candidates[1];if c then return c.m,c.mode=='world',c.mode end
+end
+local function farmPosition(part,m,settings)
+    local gap=settings.distance
+    local radius=m:GetAttribute('Radius') or 2
+    local height=(m:GetAttribute('Height') or part.Size.Y)/2
+    local direction=part.CFrame.LookVector
+    direction=Vector3.new(direction.X,0,direction.Z)
+    direction=direction.Magnitude>.01 and direction.Unit or Vector3.new(0,0,-1)
+    if settings.side=='Front' then return part.Position+direction*(radius+gap) end
+    if settings.side=='Behind' then return part.Position-direction*(radius+gap) end
+    return part.Position+Vector3.new(0,(settings.side=='Above' and 1 or -1)*(height+gap),0)
+end
+local function chestPrompt(r)
+    if not config.chest or player:GetAttribute('DungeonChest')~=true or not player:GetAttribute('DungeonRun') then return end
+    local best,dist=nil,math.huge
+    for _,p in ipairs(workspace:GetDescendants()) do
+        if p:IsA('ProximityPrompt') and p.Enabled then
+            local text=(p.Name..' '..p.ActionText..' '..p.ObjectText..' '..(p.Parent and p.Parent.Name or '')):lower()
+            local match=config.prompt=='Auto' and (text:find('chest',1,true) or text:find('กล่อง',1,true)) or config.prompt~='Auto' and promptKey(p)==config.prompt
+            local part=p.Parent
+            local pos=part and (part:IsA('Attachment') and part.WorldPosition or part:IsA('BasePart') and part.Position)
+            if not pos and part and part:IsA('Model') then pos=part:GetPivot().Position end
+            -- Only approach nearby chest prompts while this player's chest phase is active.
+            if match and pos and (r.Position-pos).Magnitude<dist and (r.Position-pos).Magnitude<250 then best={prompt=p,pos=pos};dist=(r.Position-pos).Magnitude end
+        end
+    end
+    return best
+end
+-- Replay is armed only by the server's Dungeon/chestOpen event.
+local function newReplayState() return {openedAt=nil,clicked=false,epoch=0} end
+local function observeReplay(state,kind,now,enabled)
+    if kind=='start' or kind=='loading' or kind=='restart' or kind=='cancel' or kind=='chest' then
+        state.openedAt=nil;state.clicked=false;state.epoch=state.epoch+1
+    elseif kind=='chestOpen' and enabled and not state.openedAt then
+        state.openedAt=now;state.clicked=false
+    end
+end
+local function replayDue(state,now,enabled)
+    return enabled and state.openedAt~=nil and not state.clicked and now-state.openedAt>=3
+end
+local replayState=newReplayState()
+local resultContext=nil
+local replayButtonSeen=nil
+local replayAttempts,lastReplayAttempt,replayBusy=0,-math.huge,false
+local remotes=bounded(RS,'Remotes')
+local lang=require(bounded(shared,'Lang'))
+connect(bounded(remotes,'Effect').OnClientEvent,function(channel,payload)
+    if channel=='Dungeon' and type(payload)=='table' then
+        observeReplay(replayState,payload.kind,os.clock(),config.replay)
+        if payload.kind=='start' or payload.kind=='loading' or payload.kind=='restart' or payload.kind=='chest' or payload.kind=='cancel' then
+            resultContext=nil;replayButtonSeen=nil;replayAttempts=0;lastReplayAttempt=-math.huge;replayBusy=false
+        elseif payload.kind=='result' and type(payload.dungeon)=='string' and type(payload.diff)=='string' then
+            resultContext={dungeon=payload.dungeon,diff=payload.diff}
+        elseif payload.kind=='replayState' and table.find(payload.waiting or {},player.UserId) then
+            replayState.clicked=true
+        end
+    end
+end)
+-- KnockedOut.lua uses Revive:FireServer('respawn'). Do not send
+-- when DungeonLives=0: the same button would leave or spectate instead.
+local function respawnDecision(enabled,inDungeon,down,hp,lives)
+    if not enabled or not inDungeon then return 'idle' end
+    local dead=down or (type(hp)=='number' and hp<=0)
+    if not dead then return 'alive' end
+    if type(lives)~='number' then return 'unknown' end
+    if lives<=0 then return 'exhausted' end
+    return 'respawn'
+end
+local lastRespawn=-math.huge
+local respawnAttempts=0
+local function stepRespawn()
+    local character=player.Character
+    local humanoid=character and character:FindFirstChildOfClass('Humanoid')
+    local untilTime=player:GetAttribute('DownUntil')
+    local down=type(untilTime)=='number' and untilTime>workspace:GetServerTimeNow()
+    local lives=player:GetAttribute('DungeonLives')
+    local decision=respawnDecision(config.respawn,player:GetAttribute('DungeonRun')~=nil and player:GetAttribute('DungeonRun')~=false,down,humanoid and humanoid.Health,lives)
+    if decision=='idle' or decision=='alive' then
+        respawnAttempts=0;lastRespawn=-math.huge
+        respawnDisplay.Text=config.respawn and ('Respawn: Ready | Lives: '..tostring(lives or '?')) or 'Respawn: Off'
+        return false
+    end
+    if decision=='unknown' then respawnDisplay.Text='Respawn: waiting for DungeonLives';return true end
+    if decision=='exhausted' then respawnDisplay.Text='Respawn: no lives left; waiting for revive';return true end
+    if respawnAttempts>=3 then respawnDisplay.Text='Respawn: unconfirmed after 3 attempts; toggle to retry';return true end
+    if os.clock()-lastRespawn<2 then respawnDisplay.Text='Respawn: waiting for server';return true end
+    releasePrompt()
+    lastRespawn=os.clock();respawnAttempts=respawnAttempts+1
+    bounded(remotes,'Revive'):FireServer('respawn')
+    respawnDisplay.Text=('Respawn requested | Lives: %s | Try %d/3'):format(tostring(lives),respawnAttempts)
+    return true
+end
+
+local function visibleControl(control)
+    if not control.Active or control.AbsoluteSize.X<=0 or control.AbsoluteSize.Y<=0 then return false end
+    local node=control
+    while node and node~=player.PlayerGui do
+        if node:IsA('GuiObject') and not node.Visible then return false end
+        if node:IsA('ScreenGui') and not node.Enabled then return false end
+        node=node.Parent
+    end
+    return node==player.PlayerGui
+end
+local function normalizeReplayText(text)
+    return tostring(text):gsub('<[^>]*>',''):gsub('^%s+',''):gsub('%s+$',''):upper()
+end
+local function findReplayButton()
+    local expected=normalizeReplayText(lang.t('REPLAY'))
+    for _,node in ipairs(player.PlayerGui:GetDescendants()) do
+        if node:IsA('GuiButton') and not node:IsDescendantOf(gui) and visibleControl(node) then
+            local matches=node:IsA('TextButton') and normalizeReplayText(node.Text)==expected
+            if not matches then
+                for _,child in ipairs(node:GetDescendants()) do
+                    if child:IsA('TextLabel') and child.Visible and normalizeReplayText(child.Text)==expected then matches=true;break end
+                end
+            end
+            if matches then return node end
+        end
+    end
+end
+local function clickReplay(control)
+    if type(firesignal)=='function' then
+        firesignal(control.Activated)
+    else
+        local vim=game:GetService('VirtualInputManager')
+        local point=control.AbsolutePosition+control.AbsoluteSize/2
+        local screen=control:FindFirstAncestorWhichIsA('ScreenGui')
+        if screen and not screen.IgnoreGuiInset then point=point+game:GetService('GuiService'):GetGuiInset() end
+        vim:SendMouseButtonEvent(point.X,point.Y,0,true,game,0)
+        task.wait(.05)
+        vim:SendMouseButtonEvent(point.X,point.Y,0,false,game,0)
+    end
+end
+local function stepReplay()
+    if not config.replay then
+        replayState.openedAt=nil;replayState.clicked=false
+        replayButtonSeen=nil;replayAttempts=0;lastReplayAttempt=-math.huge
+        return false
+    end
+    local control=findReplayButton()
+    -- Fallback for a missed chestOpen event: the actual reward popup is evidence
+    -- the run ended; start a full 3-second delay on first seeing its Replay button.
+    if control and control~=replayButtonSeen then
+        replayButtonSeen=control
+        if not replayState.openedAt or replayState.clicked then
+            replayState.openedAt=os.clock();replayState.clicked=false
+            replayAttempts=0;lastReplayAttempt=-math.huge
+        end
+    end
+    if replayState.clicked then return false end
+    if not replayState.openedAt then return false end
+    if not replayDue(replayState,os.clock(),true) then
+        say(('Chest opened. Replay in %.1fs'):format(math.max(0,3-(os.clock()-replayState.openedAt))))
+        return true
+    end
+    if not control then say('Waiting for an enabled Replay button');return true end
+    if replayBusy then return true end
+    if replayAttempts>=3 then say('Replay not confirmed after 3 attempts. Press manually or toggle Auto Replay to retry.');return true end
+    if os.clock()-lastReplayAttempt<2 then return true end
+    replayAttempts=replayAttempts+1;lastReplayAttempt=os.clock();replayBusy=true
+    local epoch=replayState.epoch
+    local context=resultContext
+    task.spawn(function()
+        local ok,response=pcall(function()
+            if context then
+                -- Exactly the same request used by DungeonUi's REPLAY OnClick.
+                return bounded(remotes,'Dungeon'):InvokeServer('replay',context.dungeon,context.diff)
+            end
+            clickReplay(control)
+            return nil
+        end)
+        if not running or epoch~=replayState.epoch then return end
+        replayBusy=false
+        if ok and type(response)=='table' and response.ok then
+            replayState.clicked=true
+            say(response.waiting and 'Replay confirmed: waiting for party' or 'Replay accepted by server')
+        elseif replayState.clicked then
+            say('Replay vote confirmed by server')
+        elseif ok and not context and (not control.Parent or not control.Active) then
+            replayState.clicked=true
+            say('Replay button responded; waiting for next dungeon')
+        else
+            say('Replay not confirmed: '..tostring(ok and (type(response)=='table' and (response.error or response.message) or 'button unchanged') or response))
+        end
+    end)
+    return true
+end
+
+local lastTarget,wasWorld,returnCF=nil,false,nil
+local lastMovementMode=nil
+local lastChest=0
+-- Do not run the built-in auto selector simultaneously: it can replace our boss target.
+local ownsTarget=false
+local function clearTarget()
+    movementRuntime.release();movementRuntime.lock=nil;lastMovementMode=nil
+    if ownsTarget then
+        target.setAuto(false);target.set(nil);ownsTarget=false
+        local r,h=root();if r then h:MoveTo(r.Position) end
+    end
+    lastTarget=nil
+end
+task.spawn(function()
+    while running do
+        local ok,e=pcall(function()
+            sessionStep()
+            if stepRespawn() then movementRuntime.release();return end
+            stepKeys()
+            stepPotion()
+            if stepReplay() then movementRuntime.release();return end
+            stepEnter()
+            local r,h=root();if not r then releasePrompt();return end
+            local chest=chestPrompt(r)
+            if chest and os.clock()-lastChest>3 then
+                clearTarget();releasePrompt();say('Opening dungeon chest...')
+                r.CFrame=CFrame.new(chest.pos+Vector3.new(0,0,2));h:MoveTo(r.Position)
+                task.wait(.3)
+                if not running or not config.chest or not chest.prompt.Parent or player:GetAttribute('DungeonChest')~=true then return end
+                activePrompt=chest.prompt;activePrompt:InputHoldBegin()
+                local deadline=os.clock()+activePrompt.HoldDuration+.15
+                while running and config.chest and activePrompt and activePrompt.Parent and os.clock()<deadline do task.wait(.05) end
+                releasePrompt();lastChest=os.clock();return
+            end
+            local m,isWorld,mode=choose(r)
+            local worldState=RS:GetAttribute('WorldBoss')
+            local approaching=config.world and not player:GetAttribute('DungeonRun') and (worldState=='soon' or (RS:GetAttribute('WorldBossEnds') or 0)>workspace:GetServerTimeNow())
+            if wasWorld and not isWorld and not approaching then
+                clearTarget()
+                if config.returnHome and returnCF and not player:GetAttribute('DungeonRun') then r.CFrame=returnCF end
+                wasWorld=false;returnCF=nil
+            end
+            if not m then
+                clearTarget()
+                if config.world and not player:GetAttribute('DungeonRun') then
+                    local landing=RS:GetAttribute('WorldBossLanding')
+                    local state=RS:GetAttribute('WorldBoss')
+                    if (state=='soon' or (RS:GetAttribute('WorldBossEnds') or 0)>workspace:GetServerTimeNow()) and typeof(landing)=='Vector3' then
+                        if not wasWorld then returnCF=config.position and CFrame.new(table.unpack(config.position.cf)) or r.CFrame;wasWorld=true end
+                        h:MoveTo(landing);say('Approaching World Boss landing');return
+                    end
+                    local at=RS:GetAttribute('WorldBossAt');local seconds=type(at)=='number' and math.max(0,math.ceil(at-workspace:GetServerTimeNow())) or nil
+                    say(seconds and ('Waiting World Boss: '..seconds..'s') or 'Waiting for boss / replicated spawn')
+                end
+                return
+            end
+            if isWorld and not wasWorld then returnCF=config.position and CFrame.new(table.unpack(config.position.cf)) or r.CFrame;wasWorld=true end
+            movementRuntime.lock=m
+            local movement=config.movement[mode]
+            if movement and movement.enabled then
+                local position=farmPosition(m.PrimaryPart,m,movement)
+                if lastTarget~=m or lastMovementMode~=mode then
+                    -- R is wired to TargetController.setAuto(not auto) in CombatController.
+                    -- Set explicit states to avoid toggling in the wrong direction.
+                    target.setAuto(false);movementRuntime.release()
+                    task.wait(.05)
+                    if not running or not alive(m) then return end
+                    r.CFrame=CFrame.lookAt(position,m.PrimaryPart.Position)
+                    h:MoveTo(position)
+                    target.set(m);target.setAuto(true);target.set(m)
+                    lastTarget=m;lastMovementMode=mode;ownsTarget=true
+                elseif target.current~=m then target.set(m) end
+                movementRuntime.hold(r,h,position)
+            else
+                movementRuntime.release();movementRuntime.lock=nil;lastMovementMode=nil
+                if target.auto then target.setAuto(false) end
+                if lastTarget~=m or target.current~=m then target.set(m);lastTarget=m;ownsTarget=true end
+                local pos=m.PrimaryPart.Position
+                local radiusValue=m:GetAttribute('Radius') or 2
+                local delta=r.Position-pos;local flat=Vector3.new(delta.X,0,delta.Z)
+                local dir=flat.Magnitude>.01 and flat.Unit or Vector3.new(0,0,1)
+                if delta.Magnitude>radiusValue+5 then h:MoveTo(pos+dir*(radiusValue+2)) else h:MoveTo(r.Position) end
+            end
+            if config.skills then for slot=1,4 do combat.useSkill(slot,true) end end
+            say((mode..': ')..tostring(m:GetAttribute('MonsterId') or m.Name)..' | HP '..tostring(m:GetAttribute('Health')))
+        end)
+        if not ok then releasePrompt();say('Runtime error: '..tostring(e));task.wait(1) end
+        task.wait(.25)
+    end
+end)
