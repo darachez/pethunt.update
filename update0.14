@@ -1,4 +1,4 @@
--- Pet Hunt Party / local-source implementation v0.9
+-- Pet Hunt Party / local-source implementation v0.14
 -- No external loaders. Runtime testing in Roblox/Potassium is still required.
 local Players = game:GetService('Players')
 local RS = game:GetService('ReplicatedStorage')
@@ -106,40 +106,57 @@ local function new(class,parent,props)
     for k,v in pairs(props or {}) do x[k]=v end
     x.Parent=parent;return x
 end
-local black=Color3.fromRGB(15,15,17)
-local red=Color3.fromRGB(180,35,47)
-local window=new('Frame',gui,{Size=UDim2.fromOffset(550,580),Position=UDim2.new(.5,-275,.5,-290),BackgroundColor3=black,BorderColor3=Color3.fromRGB(150,150,150),Active=true})
+local black=Color3.fromRGB(30,30,30)
+local red=Color3.fromRGB(148,110,255)
+local window=new('Frame',gui,{Size=UDim2.fromOffset(760,540),Position=UDim2.new(.5,-380,.5,-270),BackgroundColor3=black,BorderColor3=Color3.fromRGB(48,48,48),Active=true})
 local scale=new('UIScale',window,{Scale=1})
-local function resize() local cam=workspace.CurrentCamera;if cam then scale.Scale=math.min(1,(cam.ViewportSize.X-20)/550,(cam.ViewportSize.Y-30)/580) end end
+local function resize() local cam=workspace.CurrentCamera;if cam then scale.Scale=math.min(1,(cam.ViewportSize.X-20)/760,(cam.ViewportSize.Y-30)/540) end end
 resize()
-local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.9                         [RSHIFT]',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
-new('Frame',window,{Position=UDim2.fromOffset(8,29),Size=UDim2.new(1,-16,0,1),BorderSizePixel=0,BackgroundColor3=red})
-local status=new('TextLabel',window,{Position=UDim2.new(0,12,1,-57),Size=UDim2.new(1,-24,0,47),Text=startup,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,220),BackgroundTransparency=1})
+local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.14',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
+new('Frame',window,{Position=UDim2.fromOffset(8,29),Size=UDim2.new(1,-16,0,1),BorderSizePixel=0,BackgroundColor3=Color3.fromRGB(48,48,48)})
+local status=new('TextLabel',window,{Position=UDim2.new(0,198,1,-41),Size=UDim2.new(1,-210,0,33),Text=startup,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,220),BackgroundTransparency=1})
 local function say(t) if running then status.Text=tostring(t) end end
 local function guard(fn) return function() local ok,e=pcall(fn);if not ok then say('Error: '..tostring(e)) end end end
 local function button(parent,text,fn)
-    local b=new('TextButton',parent,{Text=text,Size=UDim2.new(1,0,0,25),BackgroundColor3=Color3.fromRGB(23,23,25),BorderColor3=Color3.fromRGB(65,65,65),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.fromRGB(235,235,235)})
+    local b=new('TextButton',parent,{Text=text,Size=UDim2.new(1,0,0,25),BackgroundColor3=Color3.fromRGB(32,32,32),BorderColor3=Color3.fromRGB(55,55,55),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.fromRGB(192,192,192)})
     connect(b.Activated,guard(fn));return b
 end
 local function page()
-    local p=new('ScrollingFrame',window,{Position=UDim2.fromOffset(14,73),Size=UDim2.new(1,-28,1,-139),BackgroundTransparency=1,BorderColor3=Color3.fromRGB(60,60,60),CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Visible=false})
+    local p=new('ScrollingFrame',window,{Position=UDim2.fromOffset(194,36),Size=UDim2.new(1,-202,1,-84),BackgroundColor3=Color3.fromRGB(28,28,28),BackgroundTransparency=0,BorderColor3=Color3.fromRGB(60,60,60),CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=2,ScrollBarImageColor3=red,Visible=false})
     new('UIPadding',p,{PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingTop=UDim.new(0,8),PaddingBottom=UDim.new(0,8)})
     new('UIListLayout',p,{Padding=UDim.new(0,7),SortOrder=Enum.SortOrder.LayoutOrder})
     return p
 end
 local farm,dungeon,settings=page(),page(),page();farm.Visible=true
-local tabs=new('Frame',window,{Position=UDim2.fromOffset(14,39),Size=UDim2.new(1,-28,0,25),BackgroundTransparency=1})
-local a=button(tabs,'Farm',function() farm.Visible=true;dungeon.Visible=false;settings.Visible=false end);a.Size=UDim2.fromOffset(90,25)
-local b=button(tabs,'Settings',function() farm.Visible=false;dungeon.Visible=false;settings.Visible=true end);b.Size=UDim2.fromOffset(100,25);b.Position=UDim2.fromOffset(278,0)
-local dtab=button(tabs,'Auto Farm Dungeon',function() farm.Visible=false;dungeon.Visible=true;settings.Visible=false end);dtab.Size=UDim2.fromOffset(176,25);dtab.Position=UDim2.fromOffset(96,0)
+local tabs=new('Frame',window,{Position=UDim2.fromOffset(8,36),Size=UDim2.new(0,176,1,-44),BackgroundColor3=Color3.fromRGB(27,27,27),BorderColor3=Color3.fromRGB(49,49,49)})
+do
+    local tabButtons={}
+    local function selectPage(chosen)
+        farm.Visible=chosen==farm;dungeon.Visible=chosen==dungeon;settings.Visible=chosen==settings
+        for page,control in pairs(tabButtons) do control.TextColor3=page==chosen and red or Color3.fromRGB(170,170,170) end
+    end
+    for index,entry in ipairs({{farm,'Farm'},{dungeon,'Auto Farm Dungeon'},{settings,'Settings'}}) do
+        local page=entry[1]
+        local control=button(tabs,entry[2],function() selectPage(page) end)
+        control.Position=UDim2.fromOffset(4,8+(index-1)*35);control.Size=UDim2.new(1,-8,0,29)
+        control.BackgroundTransparency=1;control.BorderSizePixel=0;control.TextSize=12
+        tabButtons[page]=control
+    end
+    selectPage(farm)
+    new('TextLabel',tabs,{Text='RSHIFT  hide / show',Position=UDim2.new(0,8,1,-25),Size=UDim2.new(1,-16,0,18),BackgroundTransparency=1,Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(105,105,105)})
+end
 local function label(p,text)
-    return new('TextLabel',p,{Size=UDim2.new(1,0,0,23),Text=text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextColor3=Color3.fromRGB(225,110,120),Font=Enum.Font.Code,TextSize=13})
+    return new('TextLabel',p,{Size=UDim2.new(1,0,0,23),Text=text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextColor3=Color3.fromRGB(186,186,186),Font=Enum.Font.Code,TextSize=13})
 end
 local refreshers={}
 local function toggle(p,key,text)
-    local x
-    local function update() x.Text=(config[key] and '[x] ' or '[ ] ')..text end
-    x=button(p,'',function() config[key]=not config[key];update() end);table.insert(refreshers,update);update()
+    local row=new('TextButton',p,{Text='   '..text,Size=UDim2.new(1,0,0,25),Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(192,192,192)})
+    row.BackgroundTransparency=1;row.BorderSizePixel=0;row.TextXAlignment=Enum.TextXAlignment.Left;row.TextSize=12
+    local box=new('Frame',row,{Position=UDim2.new(0,0,.5,-8),Size=UDim2.fromOffset(16,16),BackgroundColor3=black,BorderColor3=Color3.fromRGB(55,55,55)})
+    local fill=new('Frame',box,{Position=UDim2.fromOffset(3,3),Size=UDim2.fromOffset(10,10),BorderSizePixel=0,BackgroundColor3=red})
+    local function update() fill.Visible=config[key]==true end
+    connect(row.Activated,guard(function() config[key]=not config[key];update() end))
+    table.insert(refreshers,update);update()
 end
 local function refresh() for _,fn in ipairs(refreshers) do fn() end end
 local dropdowns={}
@@ -197,7 +214,7 @@ do
     end
 end
 local function input(p,text)
-    return new('TextBox',p,{Size=UDim2.new(1,0,0,26),Text=text,PlaceholderText=text,ClearTextOnFocus=false,Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundColor3=Color3.fromRGB(22,22,24),BorderColor3=Color3.fromRGB(65,65,65)})
+    return new('TextBox',p,{Size=UDim2.new(1,0,0,26),Text=text,PlaceholderText=text,ClearTextOnFocus=false,Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundColor3=Color3.fromRGB(31,31,31),BorderColor3=Color3.fromRGB(55,55,55)})
 end
 do
     local function movementPanel(parent,mode,title)
@@ -425,7 +442,7 @@ connect(keyQty.FocusLost,guard(function()
     local n=tonumber(keyQty.Text);assert(validQuantity(n),'Buy quantity must be 1-100');config.buyQty=n
 end))
 table.insert(refreshers,function() keyQty.Text=tostring(config.buyQty) end)
-local keyOverlay=new('Frame',window,{Size=UDim2.new(1,-40,0,230),Position=UDim2.fromOffset(20,150),BackgroundColor3=black,BorderColor3=red,Visible=false,ZIndex=100})
+local keyOverlay=new('Frame',window,{Size=UDim2.new(1,-235,0,230),Position=UDim2.fromOffset(210,145),BackgroundColor3=black,BorderColor3=red,Visible=false,ZIndex=100})
 new('UIPadding',keyOverlay,{PaddingLeft=UDim.new(0,12),PaddingRight=UDim.new(0,12),PaddingTop=UDim.new(0,12)})
 new('UIListLayout',keyOverlay,{Padding=UDim.new(0,10),SortOrder=Enum.SortOrder.LayoutOrder})
 local popupTitle=label(keyOverlay,'Buy Dungeon Keys');popupTitle.ZIndex=101
