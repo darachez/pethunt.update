@@ -1,4 +1,4 @@
--- Pet Hunt Party / local-source implementation v0.14
+-- Pet Hunt Party / local-source implementation v0.20
 -- No external loaders. Runtime testing in Roblox/Potassium is still required.
 local Players = game:GetService('Players')
 local RS = game:GetService('ReplicatedStorage')
@@ -9,7 +9,7 @@ assert(player, 'Run on the client after joining Pet Hunt Party')
 local env = (getgenv and getgenv()) or _G
 if env.PetHuntPartyHub then env.PetHuntPartyHub.stop() end
 local running, connections, activePrompt = true, {}, nil
-local config = {field=false, dungeonCombat=false, movement={}, stage=false, world=false, chest=false, replay=false, autoKeys=false, respawn=false, autoEnter=false, dungeonMode="crypt", difficulty="normal", autoPotion=false, potionBelow=100, potionBatches=5, autoExecute=false, antiAfk=false, rejoin20=false, buyQty=10, skills=false, boss='Nearest', radius=300, position=false, prompt='Auto', returnHome=true}
+local config = {smartDistance=false, autoDodge=false, stuckRecovery=false, stuckSeconds=8,field=false, dungeonCombat=false, movement={}, stage=false, world=false, chest=false, replay=false, autoKeys=false, respawn=false, autoEnter=false, dungeonMode="crypt", difficulty="normal", autoPotion=false, potionBelow=100, potionBatches=5, autoExecute=false, antiAfk=false, rejoin20=false, buyQty=10, skills=false, boss='Nearest', radius=300, position=false, prompt='Auto', returnHome=true}
 local selected, autoProfile, profiles = '', '', {}
 local folder = 'PetHuntParty/' .. tostring(game.PlaceId) .. '/' .. tostring(player.UserId)
 local persistent = type(readfile)=='function' and type(writefile)=='function' and type(isfile)=='function' and type(makefolder)=='function'
@@ -63,6 +63,8 @@ local function validate(t)
         for id,on in pairs(chosen) do assert(type(id)=='string' and type(on)=='boolean','Invalid monster choice') end
         clean.movement[mode]={enabled=m.enabled==true,side=side,distance=distance,selected=copy(chosen)}
     end
+    for _,k in ipairs({'smartDistance','autoDodge','stuckRecovery'}) do assert(t[k]==nil or type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]==true end
+    clean.stuckSeconds=t.stuckSeconds or 8;assert(type(clean.stuckSeconds)=='number' and clean.stuckSeconds>=3 and clean.stuckSeconds<=60,'Stuck seconds must be 3-60')
     clean.position=false
     if t.position then
         assert(type(t.position)=='table' and t.position.place==game.PlaceId,'Position is for a different place')
@@ -112,7 +114,7 @@ local window=new('Frame',gui,{Size=UDim2.fromOffset(760,540),Position=UDim2.new(
 local scale=new('UIScale',window,{Scale=1})
 local function resize() local cam=workspace.CurrentCamera;if cam then scale.Scale=math.min(1,(cam.ViewportSize.X-20)/760,(cam.ViewportSize.Y-30)/540) end end
 resize()
-local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.14',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
+local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.20',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
 new('Frame',window,{Position=UDim2.fromOffset(8,29),Size=UDim2.new(1,-16,0,1),BorderSizePixel=0,BackgroundColor3=Color3.fromRGB(48,48,48)})
 local status=new('TextLabel',window,{Position=UDim2.new(0,198,1,-41),Size=UDim2.new(1,-210,0,33),Text=startup,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,220),BackgroundTransparency=1})
 local function say(t) if running then status.Text=tostring(t) end end
@@ -128,14 +130,15 @@ local function page()
     return p
 end
 local farm,dungeon,settings=page(),page(),page();farm.Visible=true
+local rerollPage=page()
 local tabs=new('Frame',window,{Position=UDim2.fromOffset(8,36),Size=UDim2.new(0,176,1,-44),BackgroundColor3=Color3.fromRGB(27,27,27),BorderColor3=Color3.fromRGB(49,49,49)})
 do
     local tabButtons={}
     local function selectPage(chosen)
-        farm.Visible=chosen==farm;dungeon.Visible=chosen==dungeon;settings.Visible=chosen==settings
+        farm.Visible=chosen==farm;dungeon.Visible=chosen==dungeon;settings.Visible=chosen==settings;rerollPage.Visible=chosen==rerollPage
         for page,control in pairs(tabButtons) do control.TextColor3=page==chosen and red or Color3.fromRGB(170,170,170) end
     end
-    for index,entry in ipairs({{farm,'Farm'},{dungeon,'Auto Farm Dungeon'},{settings,'Settings'}}) do
+    for index,entry in ipairs({{farm,'Farm'},{dungeon,'Auto Farm Dungeon'},{settings,'Settings'},{rerollPage,'Gear Reroll'}}) do
         local page=entry[1]
         local control=button(tabs,entry[2],function() selectPage(page) end)
         control.Position=UDim2.fromOffset(4,8+(index-1)*35);control.Size=UDim2.new(1,-8,0,29)
@@ -266,6 +269,365 @@ do
     movementPanel(farm,'world','World Boss')
     toggle(dungeon,'dungeonCombat','Auto Farm Dungeon Monsters')
     movementPanel(dungeon,'dungeon','Dungeon')
+end
+
+local rerollRuntime={}
+do
+    local equipment=require(bounded(shared.Config,'Equipment'))
+    local items=require(bounded(shared.Config,'Items')).defs
+    local selectedUid=nil
+    local locks={}
+    local pendingAt=nil
+    local buying=false
+    local autoActive,autoStop=false,false
+    local resultSerial=0
+    local lastData=nil
+    local state={gear={},equipped={}}
+    local function lockedIndices(choices,lineCount,maxLocks)
+        local indices={}
+        for i,on in pairs(choices) do
+            if on then assert(type(i)=='number' and i%1==0 and i>=1 and i<=lineCount,'Invalid option index');table.insert(indices,i) end
+        end
+        table.sort(indices)
+        assert(#indices<=maxLocks and #indices<lineCount,'Leave at least one option unlocked')
+        return indices
+    end
+    local gearStateModule=nil
+    pcall(function() gearStateModule=require(bounded(controllers,'GearState')) end)
+    local gearSource='waiting'
+    local function normalizeGear(data)
+        if type(data)~='table' or type(data.gear)~='table' then return nil end
+        local normalized={gear={},equipped={}}
+        for uid,piece in pairs(data.gear) do
+            if type(piece)=='table' and type(piece.id)=='string' then normalized.gear[tostring(uid)]=piece end
+        end
+        for slot,uid in pairs(type(data.equipped)=='table' and data.equipped or {}) do normalized.equipped[tostring(slot)]=tostring(uid) end
+        return normalized
+    end
+    local function locateGear(owner)
+        local gui=owner:FindFirstChild('PlayerGui')
+        local private=gui and gui:FindFirstChild('PrivateData')
+        local gear=private and private:FindFirstChild('Gear')
+        if gear and gear:IsA('StringValue') then return gear,'PlayerGui.PrivateData.Gear' end
+        gear=owner:FindFirstChild('Gear')
+        if gear and gear:IsA('StringValue') then return gear,'Player.Gear (legacy)' end
+        return nil,'waiting for PrivateData.Gear'
+    end
+    local function readGear()
+        local direct=nil
+        local gear,source=locateGear(player)
+        if gear then
+            local ok,data=pcall(function() return Http:JSONDecode(gear.Value) end)
+            if ok then direct=normalizeGear(data) end
+        end
+        local fallback=nil
+        if gearStateModule and type(gearStateModule.get)=='function' then
+            local ok,data=pcall(gearStateModule.get);if ok then fallback=normalizeGear(data) end
+        end
+        local chosen=direct
+        gearSource=source
+        if (not direct or next(direct.gear)==nil) and fallback and next(fallback.gear)~=nil then chosen=fallback;gearSource='GearState' end
+        if not chosen then gearSource='waiting for Gear data';return nil end
+        state=chosen
+        return Http:JSONEncode(state)
+    end
+    local function worn(uid)
+        for slot,id in pairs(state.equipped) do if tostring(id)==tostring(uid) then return tostring(slot) end end
+    end
+    local function pieceName(piece)
+        local ok,name=pcall(equipment.displayName,piece)
+        return ok and tostring(name) or tostring(piece.id or 'Unknown gear')
+    end
+    local function lineText(option)
+        if not option then return '(empty option)' end
+        local ok,text=pcall(equipment.lineText,option)
+        return ok and tostring(text) or 'Unknown mod'
+    end
+    label(rerollPage,'-- Gear / Current Mods --')
+    label(rerollPage,'Select an item below; [WORN] marks equipped gear')
+    local resources=label(rerollPage,'Loading Gear / Inventory...')
+    local readStatus=label(rerollPage,'Gear: waiting for first update')
+    readStatus.TextWrapped=true;readStatus.Size=UDim2.new(1,0,0,38)
+    local preview=new('ScrollingFrame',rerollPage,{Size=UDim2.new(1,0,0,300),BackgroundColor3=black,BorderColor3=Color3.fromRGB(55,55,55),CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3})
+    new('UIListLayout',preview,{Padding=UDim.new(0,7),SortOrder=Enum.SortOrder.LayoutOrder})
+    local selectedLabel=label(rerollPage,'Selected: none')
+    local mainLabel=label(rerollPage,'Main stat: -')
+    local modRows=new('Frame',rerollPage,{Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1})
+    new('UIListLayout',modRows,{Padding=UDim.new(0,5)})
+    local costLabel=label(rerollPage,'Reroll cost: -')
+    local feedback=label(rerollPage,'Choose gear to begin')
+    local rebuild
+    local updateRanges
+    local function renderSelection()
+        for _,child in ipairs(modRows:GetChildren()) do if child:IsA('GuiObject') then child:Destroy() end end
+        local piece=selectedUid and state.gear[selectedUid]
+        local definition=piece and equipment.defs[piece.id]
+        if not definition then selectedLabel.Text='Selected: none';mainLabel.Text='Main stat: -';costLabel.Text='Reroll cost: -';return end
+        if updateRanges then updateRanges(definition) end
+        selectedLabel.Text=pieceName(piece)..' | UID '..tostring(selectedUid)
+        mainLabel.Text='Main (unchanged): '..lineText(piece.main)
+        local count=definition.lines or 0
+        for i=1,count do
+            local option=piece.options and piece.options[i]
+            local row=button(modRows,(locks[i] and '[LOCK] ' or '[     ] ')..i..'. '..lineText(option),function()
+                assert(not pendingAt and not buying and not autoActive,'Wait for current operation')
+                if locks[i] then locks[i]=nil else
+                    assert(option,'Empty option cannot be locked')
+                    local trial={};for index,on in pairs(locks) do trial[index]=on end;trial[i]=true
+                    lockedIndices(trial,count,equipment.reroll.maxLocks);locks=trial
+                end
+                renderSelection()
+            end)
+            row.TextXAlignment=Enum.TextXAlignment.Left;row.TextWrapped=true;row.Size=UDim2.new(1,0,0,32)
+        end
+        local indices=lockedIndices(locks,count>0 and count or 1,equipment.reroll.maxLocks)
+        costLabel.Text=('Cost: %s Gold + %d Lock Charm | max %d locks'):format(tostring(equipment.rerollCost(definition)),#indices,math.min(equipment.reroll.maxLocks,math.max(0,count-1)))
+    end
+    rebuild=function()
+        for _,child in ipairs(preview:GetChildren()) do if child:IsA('GuiObject') then child:Destroy() end end
+        local entries={};for uid,piece in pairs(state.gear) do table.insert(entries,{uid=uid,piece=piece}) end
+        table.sort(entries,function(a,b) local aw,bw=worn(a.uid),worn(b.uid);if (aw~=nil)~=(bw~=nil) then return aw~=nil end;return tostring(a.uid)<tostring(b.uid) end)
+        for order,entry in ipairs(entries) do
+            local uid,piece=entry.uid,entry.piece
+            local definition=equipment.defs[piece.id]
+            local lines={};local slot=worn(uid)
+            table.insert(lines,(slot and '[WORN '..slot..'] ' or '[BAG] ')..pieceName(piece))
+            table.insert(lines,'Main: '..lineText(piece.main))
+            for i=1,(definition and definition.lines or 0) do table.insert(lines,i..'. '..lineText(piece.options and piece.options[i])) end
+            local row=button(preview,table.concat(lines,'\n'),function()
+                assert(not pendingAt and not buying and not autoActive,'Wait for current operation');selectedUid=uid;locks={};renderSelection();feedback.Text='Selected '..pieceName(piece)
+            end)
+            row.LayoutOrder=order;row.TextWrapped=true;row.TextXAlignment=Enum.TextXAlignment.Left;row.Size=UDim2.new(1,-5,0,math.max(50,#lines*19+8))
+        end
+        if #entries==0 then local empty=label(preview,'No equipment received yet. Use Refresh Gear and Mods.');empty.TextWrapped=true;empty.Size=UDim2.new(1,-8,0,55) end
+        readStatus.Text=('Gear loaded: %d pieces | Source: %s'):format(#entries,gearSource)
+        if selectedUid and not state.gear[selectedUid] then selectedUid=nil;locks={} end
+        renderSelection()
+    end
+    button(rerollPage,'Refresh Gear and Mods',function() local data=readGear();assert(data,'Gear data not loaded');lastData=data;rebuild() end)
+    button(rerollPage,'Reroll Selected Item Once',function()
+        assert(not pendingAt and not buying and not autoActive,'Wait for current operation')
+        local raw=readGear();assert(raw,'Gear not loaded')
+        local piece=selectedUid and state.gear[selectedUid];local definition=piece and equipment.defs[piece.id]
+        assert(definition and (definition.lines or 0)>0,'Select a rerollable item')
+        local indices=lockedIndices(locks,definition.lines,equipment.reroll.maxLocks)
+        local inventory=player:FindFirstChild('Inventory')
+        assert((player:GetAttribute('Gold') or 0)>=equipment.rerollCost(definition),'Not enough Gold')
+        assert(inventory and (inventory:GetAttribute(equipment.reroll.charm) or 0)>=#indices,'Not enough Lock Charms')
+        for _,i in ipairs(indices) do assert(piece.options and piece.options[i],'Cannot lock an empty mod') end
+        pendingAt=os.clock();feedback.Text='Reroll requested; waiting for server'
+        bounded(bounded(RS,'Remotes'),'Gear'):FireServer('reroll',selectedUid,indices)
+    end)
+    label(rerollPage,'-- Auto Reroll / stop on an OPEN line --')
+    local targets={}
+    local greatOnly=true
+    local maxRolls=50
+    local targetList=new('ScrollingFrame',rerollPage,{Size=UDim2.new(1,0,0,180),BackgroundColor3=black,BorderColor3=Color3.fromRGB(55,55,55),CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3})
+    new('UIListLayout',targetList,{Padding=UDim.new(0,5),SortOrder=Enum.SortOrder.LayoutOrder})
+    local stats=require(bounded(shared.Config,'Stats'))
+    local rangeControls={}
+    local rangeDefinition=nil
+    local function gameBounds(option,definition,scaleFn,shownFn)
+        local scale=scaleFn(definition)
+        local flat=option.max>=1
+        local lo,hi,factor,step
+        if flat then
+            lo=math.max(1,math.floor(option.min*scale+.5));hi=math.max(1,math.floor(option.max*scale+.5))
+            factor=shownFn(option.key,1);step=factor
+        else
+            local multiplier=1+(scale-1)*.5
+            lo=math.floor(option.min*multiplier*1000+.5)/1000;hi=math.floor(option.max*multiplier*1000+.5)/1000
+            factor=100;step=.1
+        end
+        return lo*factor,hi*factor,factor,step,flat
+    end
+    local function validateRange(lo,hi,minAllowed,maxAllowed,step)
+        assert(type(lo)=='number' and type(hi)=='number' and lo==lo and hi==hi,'Enter numeric Min and Max')
+        assert(lo<=hi,'Min must be <= Max')
+        assert(lo>=minAllowed-1e-6 and hi<=maxAllowed+1e-6,'Min/Max must be within the game range shown')
+        assert(math.ceil((lo-1e-6)/step)*step<=hi+1e-6,'Range contains no possible game roll value')
+    end
+    label(rerollPage,'Ranges filter rolls; they do not change RNG')
+    label(rerollPage,'Percent mods: enter 5 for 5%; Cooldown uses positive magnitude')
+    for index,option in ipairs(equipment.options) do
+        local container=new('Frame',targetList,{Size=UDim2.new(1,-5,0,88),BackgroundTransparency=1,LayoutOrder=index})
+        local row
+        local displayName=option.key
+        for _,odds in ipairs(equipment.lineOdds({level=1})) do if odds.key==option.key then displayName=odds.name end end
+        row=button(container,'[ ] '..displayName,function()
+            assert(not autoActive,'Stop Auto Reroll before changing targets')
+            targets[option.key]=not targets[option.key] or nil
+            row.Text=(targets[option.key] and '[x] ' or '[ ] ')..displayName
+        end)
+        row.TextXAlignment=Enum.TextXAlignment.Left
+        local allowed=label(container,'Select gear to see game range');allowed.Position=UDim2.fromOffset(0,28);allowed.TextSize=11
+        local minBox=input(container,'');minBox.PlaceholderText='Min (blank = game minimum)';minBox.Position=UDim2.fromOffset(0,54);minBox.Size=UDim2.new(.5,-4,0,26);minBox.TextSize=11
+        local maxBox=input(container,'');maxBox.PlaceholderText='Max (blank = game maximum)';maxBox.Position=UDim2.new(.5,4,0,54);maxBox.Size=UDim2.new(.5,-4,0,26);maxBox.TextSize=11
+        rangeControls[option.key]={min=minBox,max=maxBox,label=allowed,option=option}
+        local function keepFrozen()
+            if autoActive then minBox.Text=minBox:GetAttribute('StartText') or '';maxBox.Text=maxBox:GetAttribute('StartText') or '' end
+        end
+        connect(minBox.FocusLost,keepFrozen);connect(maxBox.FocusLost,keepFrozen)
+    end
+    updateRanges=function(definition)
+        local changed=rangeDefinition~=definition
+        rangeDefinition=definition
+        for _,control in pairs(rangeControls) do
+            local lo,hi,_,step,flat=gameBounds(control.option,definition,equipment.lineScale,stats.shown)
+            control.label.Text=('Game: %g - %g%s | step %g'):format(lo,hi,flat and '' or '%',step)
+            if changed then control.min.Text='';control.max.Text='' end
+        end
+    end
+    local greatButton
+    greatButton=button(rerollPage,'[x] GREAT only',function()
+        assert(not autoActive,'Stop Auto Reroll before changing Great only')
+        greatOnly=not greatOnly;greatButton.Text=(greatOnly and '[x] ' or '[ ] ')..'GREAT only'
+    end)
+    label(rerollPage,'Maximum rolls (1-1000)')
+    local rollsInput=input(rerollPage,tostring(maxRolls))
+    local progress=label(rerollPage,'Auto Reroll: stopped')
+    local function autoHit(definition,piece,locked,wanted,onlyGreat,isGreat)
+        for index=1,definition.lines do
+            local option=piece.options and piece.options[index]
+            local criterion=option and wanted[option.key]
+            local rangeMatches=true
+            if type(criterion)=='table' then
+                local value=type(option.value)=='number' and option.value*criterion.factor or nil
+                rangeMatches=value~=nil and value>=criterion.min-1e-6 and value<=criterion.max+1e-6
+            end
+            if option and not locked[index] and (next(wanted)==nil or criterion) and rangeMatches and (not onlyGreat or isGreat(definition,option)) then return index,option end
+        end
+    end
+    button(rerollPage,'START Auto Reroll',function()
+        assert(not pendingAt and not buying and not autoActive,'Wait for current operation')
+        local limit=tonumber(rollsInput.Text)
+        assert(limit and limit%1==0 and limit>=1 and limit<=1000,'Max rolls must be 1-1000')
+        assert(next(targets)~=nil or greatOnly,'Select target mods or enable Great only')
+        local raw=readGear();assert(raw,'Gear not loaded')
+        local uid=selectedUid;local piece=uid and state.gear[uid];local definition=piece and equipment.defs[piece.id]
+        assert(definition and (definition.lines or 0)>0,'Select a rerollable item')
+        assert(type(equipment.isGreat)=='function','Game Great quality check unavailable')
+        local frozenLocks={};for i,on in pairs(locks) do frozenLocks[i]=on end
+        local indices=lockedIndices(frozenLocks,definition.lines,equipment.reroll.maxLocks)
+        local frozenTargets={}
+        for key,on in pairs(targets) do
+            if on then
+                local control=rangeControls[key]
+                local lo,hi,factor,step=gameBounds(control.option,definition,equipment.lineScale,stats.shown)
+                local minValue=control.min.Text=='' and lo or tonumber(control.min.Text)
+                local maxValue=control.max.Text=='' and hi or tonumber(control.max.Text)
+                validateRange(minValue,maxValue,lo,hi,step)
+                if greatOnly then
+                    local highest=math.floor((maxValue+1e-6)/step)*step
+                    assert(equipment.isGreat(definition,{key=key,value=highest/factor}),'Range cannot produce GREAT for '..key..'; widen Max or turn off Great only')
+                end
+                frozenTargets[key]={min=minValue,max=maxValue,factor=factor}
+                control.min:SetAttribute('StartText',control.min.Text);control.max:SetAttribute('StartText',control.max.Text)
+            end
+        end
+        local onlyGreat=greatOnly
+        maxRolls=limit;autoActive=true;autoStop=false
+        task.spawn(function()
+            local rolls,spent=0,0
+            local message='Stopped'
+            local ok,err=pcall(function()
+                while running and not autoStop and rolls<limit do
+                    assert(readGear(),'Gear data unavailable')
+                    local current=state.gear[uid]
+                    assert(current and current.id==piece.id and selectedUid==uid,'Selected item changed or disappeared')
+                    local inventory=player:FindFirstChild('Inventory')
+                    local cost=equipment.rerollCost(definition)
+                    assert((player:GetAttribute('Gold') or 0)>=cost,'Not enough Gold')
+                    assert(inventory and (inventory:GetAttribute(equipment.reroll.charm) or 0)>=#indices,'Out of Lock Charms')
+                    for _,index in ipairs(indices) do assert(current.options and current.options[index],'Locked option disappeared') end
+                    local before=resultSerial
+                    pendingAt=os.clock()
+                    bounded(bounded(RS,'Remotes'),'Gear'):FireServer('reroll',uid,indices)
+                    local deadline=os.clock()+5
+                    repeat task.wait(.05) until not running or resultSerial>before or os.clock()>=deadline
+                    if not running then return end
+                    assert(resultSerial>before,'No reroll response; stopped without retrying')
+                    -- The game also waits for replication after RerollResult.
+                    task.wait(.35)
+                    assert(readGear(),'Could not read rerolled gear')
+                    current=state.gear[uid];assert(current,'Item disappeared')
+                    rolls=rolls+1;spent=spent+cost
+                    local index,option=autoHit(definition,current,frozenLocks,frozenTargets,onlyGreat,equipment.isGreat)
+                    progress.Text=('Auto Reroll: %d/%d | Gold: %s'):format(rolls,limit,tostring(spent))
+                    if index then
+                        message=('FOUND line %d: %s | %d rolls | %s Gold'):format(index,lineText(option),rolls,tostring(spent))
+                        return
+                    end
+                    if autoStop then message='Stopped by user';return end
+                end
+                message=autoStop and 'Stopped by user' or ('Max rolls reached: '..rolls..' | Gold: '..tostring(spent))
+            end)
+            autoActive=false
+            -- Keep pendingAt after timeout; the normal timeout gate prevents immediate overlap.
+            if not running then return end
+            if not ok then message='Auto Reroll stopped: '..tostring(err) end
+            progress.Text=message;feedback.Text=message
+            local raw=readGear();if raw then local success=pcall(rebuild);if success then lastData=raw end end
+        end)
+    end)
+    button(rerollPage,'STOP Auto Reroll',function()
+        autoStop=true
+        progress.Text=autoActive and 'Stopping after current server response...' or 'Auto Reroll: stopped'
+    end)
+
+    label(rerollPage,'-- Buy Lock Charm --')
+    local quantity=input(rerollPage,'1');quantity.PlaceholderText='Quantity 1-100'
+    button(rerollPage,'Buy Lock Charms with Gold',function()
+        assert(not buying and not pendingAt and not autoActive,'Wait for current operation')
+        local amount=tonumber(quantity.Text);assert(amount and amount%1==0 and amount>=1 and amount<=100,'Quantity must be 1-100')
+        buying=true
+        task.spawn(function()
+            local bought=0
+            local ok=pcall(function()
+                local inventory=bounded(player,'Inventory');local charm=equipment.reroll.charm
+                local price=items[charm] and items[charm].buyPrice
+                for i=1,amount do
+                    if not running then break end
+                    assert(not price or (player:GetAttribute('Gold') or 0)>=price,'Not enough Gold')
+                    local before=inventory:GetAttribute(charm) or 0
+                    bounded(bounded(RS,'Remotes'),'Gear'):FireServer('buyItem',charm,1)
+                    local untilTime=os.clock()+4
+                    repeat task.wait(.15) until not running or (inventory:GetAttribute(charm) or 0)>before or os.clock()>=untilTime
+                    if not running then return end
+                    assert((inventory:GetAttribute(charm) or 0)>before,'Purchase not confirmed')
+                    bought=bought+1;feedback.Text=('Bought %d/%d Lock Charms'):format(bought,amount)
+                end
+            end)
+            buying=false
+            if running then feedback.Text=ok and ('Bought '..bought..' Lock Charms') or ('Stopped after '..bought..': check Gold / server response') end
+        end)
+    end)
+    local lastPoll=0
+    rerollRuntime.step=function()
+        if os.clock()-lastPoll<.5 then return end;lastPoll=os.clock()
+        local inventory=player:FindFirstChild('Inventory')
+        resources.Text=('Gold: %s | Lock Charm: %s'):format(tostring(player:GetAttribute('Gold') or 0),tostring(inventory and inventory:GetAttribute(equipment.reroll.charm) or 0))
+        local raw=readGear()
+        if raw and raw~=lastData then
+            local ok,err=pcall(rebuild)
+            if ok then lastData=raw else readStatus.Text='Gear panel error: '..tostring(err) end
+        elseif not raw then readStatus.Text='Waiting for player Gear / GearState data...' end
+        if pendingAt and os.clock()-pendingAt>5 then pendingAt=nil;feedback.Text='No reroll confirmation; refresh before trying again' end
+    end
+    connect(game:GetService('RunService').Heartbeat,function()
+        if not running then return end
+        local ok,err=pcall(rerollRuntime.step)
+        if not ok then readStatus.Text='Gear reader error: '..tostring(err) end
+    end)
+    task.defer(function() if running then local ok,err=pcall(rerollRuntime.step);if not ok then readStatus.Text='Gear reader error: '..tostring(err) end end end)
+    connect(bounded(bounded(RS,'Remotes'),'Effect').OnClientEvent,function(channel,payload)
+        if channel=='RerollResult' and pendingAt then
+            resultSerial=resultSerial+1
+            pendingAt=nil
+            feedback.Text='Reroll response received; updating mods'
+            task.delay(.25,function() if running then local raw=readGear();if raw then lastData=raw;rebuild() end end end)
+        end
+    end)
 end
 
 label(farm,'-- Boss automation --')
@@ -604,7 +966,7 @@ local function choose(r)
     local candidates={};local inDungeon=player:GetAttribute('DungeonRun')
     local origin=config.position and Vector3.new(table.unpack(config.position.cf,1,3)) or r.Position
     for _,m in ipairs(folder:GetChildren()) do
-        if alive(m) then
+        if alive(m) and not (movementRuntime.skip and movementRuntime.skip[m] and movementRuntime.skip[m]>os.clock()) then
             local dist=(r.Position-m.PrimaryPart.Position).Magnitude
             local id=m:GetAttribute('MonsterId');local d=defs[id];local mode
             if inDungeon then
@@ -639,6 +1001,161 @@ local function farmPosition(part,m,settings)
     if settings.side=='Behind' then return part.Position-direction*(radius+gap) end
     return part.Position+Vector3.new(0,(settings.side=='Above' and 1 or -1)*(height+gap),0)
 end
+local tactics={}
+do
+    local classes=require(bounded(shared.Config,'Classes'))
+    local casts={}
+    local tracked,lastHealth,lastProgress,attempts=nil,nil,0,0
+    local dodging=false
+    local chosenDodge=nil
+    movementRuntime.skip={}
+    label(farm,'-- Smart Farming (experimental) --')
+    toggle(farm,'smartDistance','Smart Distance (ground / weapon range)')
+    toggle(farm,'autoDodge','Auto Dodge supported boss warnings')
+    toggle(farm,'stuckRecovery','Stuck Recovery (no target HP loss)')
+    label(farm,'No progress timeout (3-60 seconds)')
+    local timeout=input(farm,tostring(config.stuckSeconds))
+    connect(timeout.FocusLost,guard(function() local n=tonumber(timeout.Text);assert(n and n>=3 and n<=60,'Timeout must be 3-60');config.stuckSeconds=n end))
+    table.insert(refreshers,function() timeout.Text=tostring(config.stuckSeconds) end)
+    local display=label(farm,'Smart Farming: Off')
+    local function safeGap(weapon,monster,leash)
+        local maximum=math.max(.5,math.min(weapon-.75,leash-5))
+        local minimum=monster+1.5
+        return math.min(maximum,minimum),minimum<=maximum
+    end
+    local function shapeDanger(shape,point,padding)
+        if typeof(shape.center)~='Vector3' then return false end
+        local center=shape.center
+        if shape.follow then
+            local follow=Players:GetPlayerByUserId(shape.follow)
+            local char=follow and follow.Character;local r=char and char:FindFirstChild('HumanoidRootPart')
+            if r then center=r.Position end
+        end
+        local delta=point-center;delta=Vector3.new(delta.X,0,delta.Z)
+        if shape.kind=='safe' or shape.kind=='tower' or shape.kind=='arena' then return false end
+        if shape.kind=='line' then
+            if typeof(shape.dir)~='Vector3' or type(shape.length)~='number' or type(shape.width)~='number' then return false end
+            local dir=Vector3.new(shape.dir.X,0,shape.dir.Z)
+            if dir.Magnitude<.001 then return false end
+            dir=dir.Unit
+            local along=delta:Dot(dir)
+            local across=math.abs(delta:Dot(Vector3.new(-dir.Z,0,dir.X)))
+            return along>=-padding and along<=shape.length+padding and across<=shape.width/2+padding
+        end
+        if type(shape.radius)~='number' then return false end
+        local distance=delta.Magnitude
+        if shape.kind=='ring' then return distance>=math.max(0,(shape.inner or 0)-padding) and distance<=shape.radius+padding end
+        return distance<=shape.radius+padding
+    end
+    connect(bounded(bounded(RS,'Remotes'),'Effect').OnClientEvent,function(channel,payload)
+        if type(payload)~='table' then return end
+        if channel=='BossCancel' then casts[payload.id or 0]=nil end
+        if channel=='BossCast' and config.autoDodge and type(payload.windup)=='number' and type(payload.shapes)=='table' then
+            casts[payload.id or 0]={payload=payload,expires=os.clock()+math.max(0,payload.windup)+.7}
+        end
+    end)
+    local function danger(point)
+        local unsafe=false
+        for id,cast in pairs(casts) do
+            if cast.expires<os.clock() then casts[id]=nil else
+                local safeNeeded=cast.payload.shape=='shelter'
+                local insideSafe=false
+                for _,shape in ipairs(cast.payload.shapes) do
+                    if shape.kind=='safe' and typeof(shape.center)=='Vector3' and type(shape.radius)=='number' then
+                        local d=point-shape.center
+                        if Vector3.new(d.X,0,d.Z).Magnitude<math.max(.5,shape.radius-1.5) then insideSafe=true end
+                    elseif shapeDanger(shape,point,2) then unsafe=true end
+                end
+                if safeNeeded and not insideSafe then unsafe=true end
+            end
+        end
+        return unsafe
+    end
+    local function ground(point,r,h,m)
+        local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude
+        local excluded={player.Character,workspace:FindFirstChild('Monsters'),workspace:FindFirstChild('BossFx')}
+        local filtered={};for _,v in pairs(excluded) do if v then table.insert(filtered,v) end end
+        params.FilterDescendantsInstances=filtered
+        local hit=workspace:Raycast(point+Vector3.new(0,15,0),Vector3.new(0,-60,0),params)
+        if not hit or hit.Normal.Y<.6 then return nil end
+        local position=Vector3.new(point.X,hit.Position.Y+h.HipHeight+r.Size.Y/2,point.Z)
+        local definition=defs[m:GetAttribute('MonsterId') or '']
+        local center=m:GetAttribute('ArenaCenter') or m.PrimaryPart.Position
+        local leash=m:GetAttribute('ArenaRadius') or (definition and definition.leash) or 50
+        if typeof(center)~='Vector3' or type(leash)~='number' then return nil end
+        local d=position-center
+        if Vector3.new(d.X,0,d.Z).Magnitude>math.max(4,leash-4) then return nil end
+        return position
+    end
+    function tactics.smart(r,h,m,preferred)
+        if not config.smartDistance then return preferred end
+        local class=classes.defs[player:GetAttribute('Class') or '']
+        local definition=defs[m:GetAttribute('MonsterId') or '']
+        local gap,separated=safeGap(class and class.attackRange or 5,definition and definition.attackRange or 3,definition and definition.leash or 50)
+        local offset=preferred-m.PrimaryPart.Position;offset=Vector3.new(offset.X,0,offset.Z)
+        if offset.Magnitude<.01 then offset=r.Position-m.PrimaryPart.Position;offset=Vector3.new(offset.X,0,offset.Z) end
+        local dir=offset.Magnitude>.01 and offset.Unit or Vector3.new(0,0,1)
+        local desired=m.PrimaryPart.Position+dir*((m:GetAttribute('Radius') or 2)+gap)
+        display.Text=separated and 'Smart Distance: outside basic monster reach' or 'Smart Distance: weapon too short for a safe gap'
+        return ground(desired,r,h,m) or preferred
+    end
+    function tactics.step(r,h,m)
+        local now=os.clock()
+        if config.autoDodge then
+            local threatened=danger(r.Position)
+            if threatened or (dodging and next(casts)~=nil) then
+                if not chosenDodge or danger(chosenDodge) then
+                    local candidates={}
+                    for _,cast in pairs(casts) do for _,shape in ipairs(cast.payload.shapes) do
+                        if shape.kind=='safe' and typeof(shape.center)=='Vector3' then table.insert(candidates,shape.center) end
+                    end end
+                    for _,distance in ipairs({5,10,16,24}) do for i=0,15 do local angle=i*math.pi/8;table.insert(candidates,r.Position+Vector3.new(math.cos(angle)*distance,0,math.sin(angle)*distance)) end end
+                    local best,cost=nil,math.huge
+                    for _,candidate in ipairs(candidates) do
+                        local position=ground(candidate,r,h,m)
+                        if position and not danger(position) and (position-r.Position).Magnitude<cost then best=position;cost=(position-r.Position).Magnitude end
+                    end
+                    chosenDodge=best
+                end
+                if chosenDodge then
+                    if not dodging then target.setAuto(false);target.set(nil);movementRuntime.release() end
+                    dodging=true;h:MoveTo(chosenDodge);lastProgress=now
+                    display.Text='Auto Dodge: moving to supported safe point';return true
+                end
+                display.Text='Auto Dodge: no safe ground candidate'
+            elseif dodging then
+                dodging=false;chosenDodge=nil;lastProgress=now
+            end
+        elseif dodging then dodging=false;chosenDodge=nil;casts={} end
+        if not config.stuckRecovery then tracked=nil;return false end
+        local health=m:GetAttribute('Health') or 0
+        if tracked~=m then tracked=m;lastHealth=health;lastProgress=now;attempts=0;return false end
+        if lastHealth and health<lastHealth then lastProgress=now;attempts=0 end
+        lastHealth=health
+        if now-lastProgress<config.stuckSeconds then return false end
+        lastProgress=now
+        if m:GetAttribute('Shielded') then attempts=0;display.Text='Recovery: waiting for shield phase';return false end
+        attempts=attempts+1
+        if attempts>2 then
+            movementRuntime.skip[m]=now+15;movementRuntime.release();target.setAuto(false);target.set(nil)
+            display.Text='Recovery: skip unresponsive target for 15s';return true
+        end
+        local relative=r.Position-m.PrimaryPart.Position;relative=Vector3.new(relative.X,0,relative.Z)
+        local direction=relative.Magnitude>.01 and relative.Unit or Vector3.new(0,0,1)
+        local desired=m.PrimaryPart.Position+Vector3.new(-direction.Z,0,direction.X)*math.max(4,relative.Magnitude)
+        local position=ground(desired,r,h,m)
+        if position and not danger(position) then
+            target.setAuto(false);movementRuntime.release()
+            r.CFrame=CFrame.lookAt(position,m.PrimaryPart.Position);r.AssemblyLinearVelocity=Vector3.new();h:MoveTo(position)
+            movementRuntime.offset=position-m.PrimaryPart.Position
+            movementRuntime.recoveryPoint={monster=m,position=position,expires=now+2}
+            display.Text='Recovery: reposition attempt '..attempts
+            return true
+        end
+        display.Text='Recovery: no valid reposition ground';return false
+    end
+end
+
 local function chestPrompt(r)
     if not config.chest or player:GetAttribute('DungeonChest')~=true or not player:GetAttribute('DungeonRun') then return end
     local best,dist=nil,math.huge
@@ -872,15 +1389,18 @@ task.spawn(function()
                 return
             end
             if isWorld and not wasWorld then returnCF=config.position and CFrame.new(table.unpack(config.position.cf)) or r.CFrame;wasWorld=true end
+            if tactics.step(r,h,m) then lastTarget=nil;lastMovementMode=nil;return end
             movementRuntime.lock=m
             local movement=config.movement[mode]
             if movement and movement.enabled then
-                local movementKey=mode..movement.side..tostring(movement.distance)
+                local movementKey=mode..movement.side..tostring(movement.distance)..tostring(config.smartDistance)
                 if movementRuntime.monster~=m or movementRuntime.key~=movementKey then
                     movementRuntime.offset=farmPosition(m.PrimaryPart,m,movement)-m.PrimaryPart.Position
                     movementRuntime.monster=m;movementRuntime.key=movementKey
                 end
-                local position=m.PrimaryPart.Position+movementRuntime.offset
+                local position=tactics.smart(r,h,m,m.PrimaryPart.Position+movementRuntime.offset)
+                local recovery=movementRuntime.recoveryPoint
+                if recovery and recovery.monster==m and recovery.expires>os.clock() then position=recovery.position end
                 if lastTarget~=m or lastMovementMode~=mode then
                     -- R is wired to TargetController.setAuto(not auto) in CombatController.
                     -- Set explicit states to avoid toggling in the wrong direction.
@@ -901,7 +1421,8 @@ task.spawn(function()
                 local radiusValue=m:GetAttribute('Radius') or 2
                 local delta=r.Position-pos;local flat=Vector3.new(delta.X,0,delta.Z)
                 local dir=flat.Magnitude>.01 and flat.Unit or Vector3.new(0,0,1)
-                if delta.Magnitude>radiusValue+5 then h:MoveTo(pos+dir*(radiusValue+2)) else h:MoveTo(r.Position) end
+                if config.smartDistance then h:MoveTo(tactics.smart(r,h,m,pos+dir*(radiusValue+2)))
+                elseif delta.Magnitude>radiusValue+5 then h:MoveTo(pos+dir*(radiusValue+2)) else h:MoveTo(r.Position) end
             end
             if config.skills then for slot=1,4 do combat.useSkill(slot,true) end end
             say((mode..': ')..tostring(m:GetAttribute('MonsterId') or m.Name)..' | HP '..tostring(m:GetAttribute('Health')))
