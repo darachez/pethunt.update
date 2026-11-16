@@ -1,4 +1,4 @@
--- Pet Hunt Party / local-source implementation v0.21
+-- Pet Hunt Party / local-source implementation v0.22
 -- No external loaders. Runtime testing in Roblox/Potassium is still required.
 local Players = game:GetService('Players')
 local RS = game:GetService('ReplicatedStorage')
@@ -114,7 +114,7 @@ local window=new('Frame',gui,{Size=UDim2.fromOffset(760,540),Position=UDim2.new(
 local scale=new('UIScale',window,{Scale=1})
 local function resize() local cam=workspace.CurrentCamera;if cam then scale.Scale=math.min(1,(cam.ViewportSize.X-20)/760,(cam.ViewportSize.Y-30)/540) end end
 resize()
-local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.21',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
+local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.22',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
 new('Frame',window,{Position=UDim2.fromOffset(8,29),Size=UDim2.new(1,-16,0,1),BorderSizePixel=0,BackgroundColor3=Color3.fromRGB(48,48,48)})
 local status=new('TextLabel',window,{Position=UDim2.new(0,198,1,-41),Size=UDim2.new(1,-210,0,33),Text=startup,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,220),BackgroundTransparency=1})
 local function say(t) if running then status.Text=tostring(t) end end
@@ -124,7 +124,7 @@ local function button(parent,text,fn)
     connect(b.Activated,guard(fn));return b
 end
 local function page()
-    local p=new('ScrollingFrame',window,{Position=UDim2.fromOffset(194,36),Size=UDim2.new(1,-202,1,-84),BackgroundColor3=Color3.fromRGB(28,28,28),BackgroundTransparency=0,BorderColor3=Color3.fromRGB(60,60,60),CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=2,ScrollBarImageColor3=red,Visible=false})
+    local p=new('ScrollingFrame',window,{Position=UDim2.fromOffset(194,36),Size=UDim2.new(1,-202,1,-84),BackgroundColor3=Color3.fromRGB(28,28,28),BackgroundTransparency=0,BorderColor3=Color3.fromRGB(60,60,60),CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=6,ScrollBarImageColor3=Color3.fromRGB(155,155,155),VerticalScrollBarInset=Enum.ScrollBarInset.Always,ScrollingDirection=Enum.ScrollingDirection.Y,ClipsDescendants=true,Visible=false})
     new('UIPadding',p,{PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingTop=UDim.new(0,8),PaddingBottom=UDim.new(0,8)})
     new('UIListLayout',p,{Padding=UDim.new(0,7),SortOrder=Enum.SortOrder.LayoutOrder})
     return p
@@ -138,7 +138,7 @@ do
         farm.Visible=chosen==farm;dungeon.Visible=chosen==dungeon;settings.Visible=chosen==settings;rerollPage.Visible=chosen==rerollPage
         for page,control in pairs(tabButtons) do control.TextColor3=page==chosen and red or Color3.fromRGB(170,170,170) end
     end
-    for index,entry in ipairs({{farm,'Farm'},{dungeon,'Auto Farm Dungeon'},{settings,'Settings'},{rerollPage,'Gear Reroll'}}) do
+    for index,entry in ipairs({{farm,'Farm'},{dungeon,'Auto Farm Dungeon'},{rerollPage,'Gear Reroll'},{settings,'Settings'}}) do
         local page=entry[1]
         local control=button(tabs,entry[2],function() selectPage(page) end)
         control.Position=UDim2.fromOffset(4,8+(index-1)*35);control.Size=UDim2.new(1,-8,0,29)
@@ -271,6 +271,28 @@ do
     movementPanel(dungeon,'dungeon','Dungeon')
 end
 
+local nestedScrollLocks={}
+local function setupNestedScroll(parent,child)
+    child.Active=true;child.ScrollingEnabled=true
+    child.ScrollingDirection=Enum.ScrollingDirection.Y
+    child.ScrollBarThickness=7;child.ScrollBarImageColor3=Color3.fromRGB(175,155,220)
+    child.ScrollBarImageTransparency=0;child.VerticalScrollBarInset=Enum.ScrollBarInset.Always
+    child.ClipsDescendants=true
+    new('UIPadding',child,{PaddingLeft=UDim.new(0,3),PaddingRight=UDim.new(0,12),PaddingTop=UDim.new(0,3),PaddingBottom=UDim.new(0,8)})
+    local hovering,touching=false,false
+    local function update()
+        nestedScrollLocks[child]={parent=parent,locked=(hovering or touching) and child.Visible and parent.Visible}
+        local locked=false
+        for control,entry in pairs(nestedScrollLocks) do if control.Parent and entry.parent==parent and entry.locked then locked=true;break end end
+        parent.ScrollingEnabled=not locked
+    end
+    connect(child.MouseEnter,function() hovering=true;update() end)
+    connect(child.MouseLeave,function() hovering=false;update() end)
+    connect(child.InputBegan,function(input) if input.UserInputType==Enum.UserInputType.Touch then touching=true;update() end end)
+    connect(UIS.InputEnded,function(input) if input.UserInputType==Enum.UserInputType.Touch then touching=false;update() end end)
+    connect(parent:GetPropertyChangedSignal('Visible'),function() hovering=false;touching=false;update() end)
+end
+
 local rerollRuntime={}
 do
     local equipment=require(bounded(shared.Config,'Equipment'))
@@ -349,6 +371,7 @@ do
     local readStatus=label(rerollPage,'Gear: waiting for first update')
     readStatus.TextWrapped=true;readStatus.Size=UDim2.new(1,0,0,38)
     local preview=new('ScrollingFrame',rerollPage,{Size=UDim2.new(1,0,0,300),BackgroundColor3=black,BorderColor3=Color3.fromRGB(55,55,55),CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3})
+    setupNestedScroll(rerollPage,preview)
     new('UIListLayout',preview,{Padding=UDim.new(0,7),SortOrder=Enum.SortOrder.LayoutOrder})
     local selectedLabel=label(rerollPage,'Selected: none')
     local mainLabel=label(rerollPage,'Main stat: -')
@@ -384,6 +407,7 @@ do
         costLabel.Text=('Cost: %s Gold + %d Lock Charm | max %d locks'):format(tostring(equipment.rerollCost(definition)),#indices,math.min(equipment.reroll.maxLocks,math.max(0,count-1)))
     end
     rebuild=function()
+        local savedScroll=preview.CanvasPosition
         for _,child in ipairs(preview:GetChildren()) do if child:IsA('GuiObject') then child:Destroy() end end
         local entries={};for uid,piece in pairs(state.gear) do table.insert(entries,{uid=uid,piece=piece}) end
         table.sort(entries,function(a,b) local aw,bw=worn(a.uid),worn(b.uid);if (aw~=nil)~=(bw~=nil) then return aw~=nil end;return tostring(a.uid)<tostring(b.uid) end)
@@ -403,6 +427,12 @@ do
         readStatus.Text=('Gear loaded: %d pieces | Source: %s'):format(#entries,gearSource)
         if selectedUid and not state.gear[selectedUid] then selectedUid=nil;locks={} end
         renderSelection()
+        task.defer(function()
+            if running and preview.Parent then
+                local maximum=math.max(0,preview.AbsoluteCanvasSize.Y-preview.AbsoluteWindowSize.Y)
+                preview.CanvasPosition=Vector2.new(0,math.clamp(savedScroll.Y,0,maximum))
+            end
+        end)
     end
     button(rerollPage,'Refresh Gear and Mods',function() local data=readGear();assert(data,'Gear data not loaded');lastData=data;rebuild() end)
     button(rerollPage,'Reroll Selected Item Once',function()
@@ -423,6 +453,7 @@ do
     local greatOnly=true
     local maxRolls=50
     local targetList=new('ScrollingFrame',rerollPage,{Size=UDim2.new(1,0,0,180),BackgroundColor3=black,BorderColor3=Color3.fromRGB(55,55,55),CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3})
+    setupNestedScroll(rerollPage,targetList)
     new('UIListLayout',targetList,{Padding=UDim.new(0,5),SortOrder=Enum.SortOrder.LayoutOrder})
     local stats=require(bounded(shared.Config,'Stats'))
     local rangeControls={}
