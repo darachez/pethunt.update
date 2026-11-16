@@ -1,4 +1,4 @@
--- Pet Hunt Party / local-source implementation v0.20
+-- Pet Hunt Party / local-source implementation v0.21
 -- No external loaders. Runtime testing in Roblox/Potassium is still required.
 local Players = game:GetService('Players')
 local RS = game:GetService('ReplicatedStorage')
@@ -9,7 +9,7 @@ assert(player, 'Run on the client after joining Pet Hunt Party')
 local env = (getgenv and getgenv()) or _G
 if env.PetHuntPartyHub then env.PetHuntPartyHub.stop() end
 local running, connections, activePrompt = true, {}, nil
-local config = {smartDistance=false, autoDodge=false, stuckRecovery=false, stuckSeconds=8,field=false, dungeonCombat=false, movement={}, stage=false, world=false, chest=false, replay=false, autoKeys=false, respawn=false, autoEnter=false, dungeonMode="crypt", difficulty="normal", autoPotion=false, potionBelow=100, potionBatches=5, autoExecute=false, antiAfk=false, rejoin20=false, buyQty=10, skills=false, boss='Nearest', radius=300, position=false, prompt='Auto', returnHome=true}
+local config = {towerFastDodge=false, smartDistance=false, autoDodge=false, stuckRecovery=false, stuckSeconds=8,field=false, dungeonCombat=false, movement={}, stage=false, world=false, chest=false, replay=false, autoKeys=false, respawn=false, autoEnter=false, dungeonMode="crypt", difficulty="normal", autoPotion=false, potionBelow=100, potionBatches=5, autoExecute=false, antiAfk=false, rejoin20=false, buyQty=10, skills=false, boss='Nearest', radius=300, position=false, prompt='Auto', returnHome=true}
 local selected, autoProfile, profiles = '', '', {}
 local folder = 'PetHuntParty/' .. tostring(game.PlaceId) .. '/' .. tostring(player.UserId)
 local persistent = type(readfile)=='function' and type(writefile)=='function' and type(isfile)=='function' and type(makefolder)=='function'
@@ -63,7 +63,7 @@ local function validate(t)
         for id,on in pairs(chosen) do assert(type(id)=='string' and type(on)=='boolean','Invalid monster choice') end
         clean.movement[mode]={enabled=m.enabled==true,side=side,distance=distance,selected=copy(chosen)}
     end
-    for _,k in ipairs({'smartDistance','autoDodge','stuckRecovery'}) do assert(t[k]==nil or type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]==true end
+    for _,k in ipairs({'smartDistance','autoDodge','stuckRecovery','towerFastDodge'}) do assert(t[k]==nil or type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]==true end
     clean.stuckSeconds=t.stuckSeconds or 8;assert(type(clean.stuckSeconds)=='number' and clean.stuckSeconds>=3 and clean.stuckSeconds<=60,'Stuck seconds must be 3-60')
     clean.position=false
     if t.position then
@@ -114,7 +114,7 @@ local window=new('Frame',gui,{Size=UDim2.fromOffset(760,540),Position=UDim2.new(
 local scale=new('UIScale',window,{Scale=1})
 local function resize() local cam=workspace.CurrentCamera;if cam then scale.Scale=math.min(1,(cam.ViewportSize.X-20)/760,(cam.ViewportSize.Y-30)/540) end end
 resize()
-local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.20',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
+local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.21',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
 new('Frame',window,{Position=UDim2.fromOffset(8,29),Size=UDim2.new(1,-16,0,1),BorderSizePixel=0,BackgroundColor3=Color3.fromRGB(48,48,48)})
 local status=new('TextLabel',window,{Position=UDim2.new(0,198,1,-41),Size=UDim2.new(1,-210,0,33),Text=startup,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,220),BackgroundTransparency=1})
 local function say(t) if running then status.Text=tostring(t) end end
@@ -1005,6 +1005,8 @@ local tactics={}
 do
     local classes=require(bounded(shared.Config,'Classes'))
     local casts={}
+    local moveController=require(bounded(controllers,'MoveController'))
+    local lastNativeDodge=-math.huge
     local tracked,lastHealth,lastProgress,attempts=nil,nil,0,0
     local dodging=false
     local chosenDodge=nil
@@ -1012,6 +1014,7 @@ do
     label(farm,'-- Smart Farming (experimental) --')
     toggle(farm,'smartDistance','Smart Distance (ground / weapon range)')
     toggle(farm,'autoDodge','Auto Dodge supported boss warnings')
+    toggle(farm,'towerFastDodge','Tower Fast Dodge (reposition instead of walking)')
     toggle(farm,'stuckRecovery','Stuck Recovery (no target HP loss)')
     label(farm,'No progress timeout (3-60 seconds)')
     local timeout=input(farm,tostring(config.stuckSeconds))
@@ -1049,19 +1052,33 @@ do
     end
     connect(bounded(bounded(RS,'Remotes'),'Effect').OnClientEvent,function(channel,payload)
         if type(payload)~='table' then return end
-        if channel=='BossCancel' then casts[payload.id or 0]=nil end
+        if channel=='Dungeon' and (payload.kind=='floor' or payload.kind=='start' or payload.kind=='loading' or payload.kind=='cancel') then
+            casts={};chosenDodge=nil
+        end
+        if channel=='BossCancel' then casts[payload.id or 0]=nil;chosenDodge=nil end
+        if channel=='BossHit' then
+            if payload.shape=='puddles' and type(payload.shapes)=='table' then
+                casts['puddle:'..tostring(payload.id or os.clock())]={payload=payload,expires=os.clock()+math.min(60,math.max(0,tonumber(payload.duration) or 5))}
+            end
+            -- Keep cast geometry briefly after impact; do not return into its hit window.
+            local active=casts[payload.id or 0]
+            if active then active.expires=math.max(active.expires,os.clock()+.5) end
+            chosenDodge=nil
+        end
         if channel=='BossCast' and config.autoDodge and type(payload.windup)=='number' and type(payload.shapes)=='table' then
             casts[payload.id or 0]={payload=payload,expires=os.clock()+math.max(0,payload.windup)+.7}
+            chosenDodge=nil
         end
     end)
     local function danger(point)
         local unsafe=false
         for id,cast in pairs(casts) do
             if cast.expires<os.clock() then casts[id]=nil else
-                local safeNeeded=cast.payload.shape=='shelter'
+                local mechanic=cast.payload.shape
+                local safeNeeded=mechanic=='shelter' or mechanic=='towers' or mechanic=='stack'
                 local insideSafe=false
                 for _,shape in ipairs(cast.payload.shapes) do
-                    if shape.kind=='safe' and typeof(shape.center)=='Vector3' and type(shape.radius)=='number' then
+                    if (shape.kind=='safe' or shape.kind=='tower' or mechanic=='stack') and typeof(shape.center)=='Vector3' and type(shape.radius)=='number' then
                         local d=point-shape.center
                         if Vector3.new(d.X,0,d.Z).Magnitude<math.max(.5,shape.radius-1.5) then insideSafe=true end
                     elseif shapeDanger(shape,point,2) then unsafe=true end
@@ -1099,7 +1116,7 @@ do
         display.Text=separated and 'Smart Distance: outside basic monster reach' or 'Smart Distance: weapon too short for a safe gap'
         return ground(desired,r,h,m) or preferred
     end
-    function tactics.step(r,h,m)
+    function tactics.dodge(r,h,m)
         local now=os.clock()
         if config.autoDodge then
             local threatened=danger(r.Position)
@@ -1107,26 +1124,49 @@ do
                 if not chosenDodge or danger(chosenDodge) then
                     local candidates={}
                     for _,cast in pairs(casts) do for _,shape in ipairs(cast.payload.shapes) do
-                        if shape.kind=='safe' and typeof(shape.center)=='Vector3' then table.insert(candidates,shape.center) end
+                        if (shape.kind=='safe' or shape.kind=='tower' or cast.payload.shape=='stack') and typeof(shape.center)=='Vector3' then table.insert(candidates,shape.center) end
                     end end
                     for _,distance in ipairs({5,10,16,24}) do for i=0,15 do local angle=i*math.pi/8;table.insert(candidates,r.Position+Vector3.new(math.cos(angle)*distance,0,math.sin(angle)*distance)) end end
                     local best,cost=nil,math.huge
                     for _,candidate in ipairs(candidates) do
-                        local position=ground(candidate,r,h,m)
+                        local position=not danger(candidate) and ground(candidate,r,h,m) or nil
                         if position and not danger(position) and (position-r.Position).Magnitude<cost then best=position;cost=(position-r.Position).Magnitude end
                     end
                     chosenDodge=best
                 end
                 if chosenDodge then
                     if not dodging then target.setAuto(false);target.set(nil);movementRuntime.release() end
-                    dodging=true;h:MoveTo(chosenDodge);lastProgress=now
-                    display.Text='Auto Dodge: moving to supported safe point';return true
+                    dodging=true;tactics.busy=true
+                    if config.towerFastDodge and player:GetAttribute('TowerFloor') then
+                        if (r.Position-chosenDodge).Magnitude>1 then
+                            r.CFrame=CFrame.new(chosenDodge)*r.CFrame.Rotation
+                            r.AssemblyLinearVelocity=Vector3.new();r.AssemblyAngularVelocity=Vector3.new()
+                        end
+                        h:MoveTo(chosenDodge)
+                        display.Text='Tower Dodge: reposition / hold safe point'
+                    else
+                        local delta=chosenDodge-r.Position
+                        h:MoveTo(chosenDodge)
+                        if delta.Magnitude>5 and now-lastNativeDodge>=.95 then
+                            h:Move(Vector3.new(delta.X,0,delta.Z).Unit)
+                            moveController.dodge();lastNativeDodge=now
+                        end
+                        display.Text='Auto Dodge: movement + native dodge'
+                    end
+                    lastProgress=now;return true
                 end
                 display.Text='Auto Dodge: no safe ground candidate'
             elseif dodging then
                 dodging=false;chosenDodge=nil;lastProgress=now
             end
         elseif dodging then dodging=false;chosenDodge=nil;casts={} end
+        tactics.busy=dodging
+        return false
+    end
+    function tactics.step(r,h,m)
+        tactics.lastMonster=m
+        if tactics.dodge(r,h,m) then return true end
+        local now=os.clock()
         if not config.stuckRecovery then tracked=nil;return false end
         local health=m:GetAttribute('Health') or 0
         if tracked~=m then tracked=m;lastHealth=health;lastProgress=now;attempts=0;return false end
@@ -1338,12 +1378,25 @@ local lastChest=0
 -- Do not run the built-in auto selector simultaneously: it can replace our boss target.
 local ownsTarget=false
 local function clearTarget()
+    tactics.lastMonster=nil
     movementRuntime.release();movementRuntime.lock=nil;lastMovementMode=nil
     if ownsTarget then
         target.setAuto(false);target.set(nil);ownsTarget=false
         local r,h=root();if r then h:MoveTo(r.Position) end
     end
     lastTarget=nil
+end
+do
+    local elapsed=0
+    connect(game:GetService('RunService').Heartbeat,function(dt)
+        elapsed=elapsed+dt;if elapsed<.05 then return end;elapsed=0
+        if not running or not config.autoDodge then return end
+        local r,h=root();local m=tactics.lastMonster or movementRuntime.lock or target.current
+        if not r or not alive(m) then return end
+        local ok,active=pcall(tactics.dodge,r,h,m)
+        if ok and active then lastTarget=nil;lastMovementMode=nil end
+        if not ok then say('Auto Dodge error: '..tostring(active)) end
+    end)
 end
 task.spawn(function()
     while running do
