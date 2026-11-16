@@ -1,4 +1,4 @@
--- Pet Hunt Party / local-source implementation v0.22new
+-- Pet Hunt Party / local-source implementation v0.23
 -- No external loaders. Runtime testing in Roblox/Potassium is still required.
 local Players = game:GetService('Players')
 local RS = game:GetService('ReplicatedStorage')
@@ -114,7 +114,7 @@ local window=new('Frame',gui,{Size=UDim2.fromOffset(760,540),Position=UDim2.new(
 local scale=new('UIScale',window,{Scale=1})
 local function resize() local cam=workspace.CurrentCamera;if cam then scale.Scale=math.min(1,(cam.ViewportSize.X-20)/760,(cam.ViewportSize.Y-30)/540) end end
 resize()
-local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.22',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
+local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.23',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
 new('Frame',window,{Position=UDim2.fromOffset(8,29),Size=UDim2.new(1,-16,0,1),BorderSizePixel=0,BackgroundColor3=Color3.fromRGB(48,48,48)})
 local status=new('TextLabel',window,{Position=UDim2.new(0,198,1,-41),Size=UDim2.new(1,-210,0,33),Text=startup,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,220),BackgroundTransparency=1})
 local function say(t) if running then status.Text=tostring(t) end end
@@ -1189,10 +1189,11 @@ do
                 display.Text='Auto Dodge: no safe ground candidate'
             elseif dodging then
                 dodging=false;chosenDodge=nil;lastProgress=now
+                tactics.resumeRequested=true
             end
-        elseif dodging then dodging=false;chosenDodge=nil;casts={} end
+        elseif dodging then dodging=false;chosenDodge=nil;casts={};tactics.resumeRequested=true end
         tactics.busy=dodging
-        return false
+        return dodging
     end
     function tactics.step(r,h,m)
         tactics.lastMonster=m
@@ -1403,6 +1404,12 @@ local function stepReplay()
     return true
 end
 
+local function keepAutoTarget(controller,monster)
+    if controller.current~=monster then controller.set(monster) end
+    if not controller.auto then controller.setAuto(true) end
+    -- setAuto may let the game's selector choose another monster; restore our choice.
+    if controller.current~=monster then controller.set(monster) end
+end
 local lastTarget,wasWorld,returnCF=nil,false,nil
 local lastMovementMode=nil
 local lastChest=0
@@ -1493,14 +1500,16 @@ task.spawn(function()
                     if not running or not alive(m) then return end
                     r.CFrame=CFrame.lookAt(position,m.PrimaryPart.Position)
                     h:MoveTo(position)
-                    target.set(m);target.setAuto(true);target.set(m)
+                    keepAutoTarget(target,m)
                     lastTarget=m;lastMovementMode=mode;ownsTarget=true
-                elseif target.current~=m then target.set(m) end
+                else keepAutoTarget(target,m) end
+                tactics.resumeRequested=false
                 movementRuntime.hold(r,h,position,m.PrimaryPart)
             else
                 movementRuntime.release();movementRuntime.lock=nil;lastMovementMode=nil
-                if target.auto then target.setAuto(false) end
-                if lastTarget~=m or target.current~=m then target.set(m);lastTarget=m;ownsTarget=true end
+                keepAutoTarget(target,m)
+                tactics.resumeRequested=false
+                lastTarget=m;ownsTarget=true
                 local pos=m.PrimaryPart.Position
                 local radiusValue=m:GetAttribute('Radius') or 2
                 local delta=r.Position-pos;local flat=Vector3.new(delta.X,0,delta.Z)
