@@ -1,4 +1,4 @@
--- Pet Hunt Party / local-source implementation v0.22
+-- Pet Hunt Party / local-source implementation v0.22new
 -- No external loaders. Runtime testing in Roblox/Potassium is still required.
 local Players = game:GetService('Players')
 local RS = game:GetService('ReplicatedStorage')
