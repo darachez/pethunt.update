@@ -1,4 +1,4 @@
--- Pet Hunt Party / local-source implementation v0.23
+-- Pet Hunt Party / local-source implementation v0.33
 -- No external loaders. Runtime testing in Roblox/Potassium is still required.
 local Players = game:GetService('Players')
 local RS = game:GetService('ReplicatedStorage')
@@ -9,7 +9,7 @@ assert(player, 'Run on the client after joining Pet Hunt Party')
 local env = (getgenv and getgenv()) or _G
 if env.PetHuntPartyHub then env.PetHuntPartyHub.stop() end
 local running, connections, activePrompt = true, {}, nil
-local config = {towerFastDodge=false, smartDistance=false, autoDodge=false, stuckRecovery=false, stuckSeconds=8,field=false, dungeonCombat=false, movement={}, stage=false, world=false, chest=false, replay=false, autoKeys=false, respawn=false, autoEnter=false, dungeonMode="crypt", difficulty="normal", autoPotion=false, potionBelow=100, potionBatches=5, autoExecute=false, antiAfk=false, rejoin20=false, buyQty=10, skills=false, boss='Nearest', radius=300, position=false, prompt='Auto', returnHome=true}
+local config = {extendSearch=false,searchRadius=250,dungeonCombat=false,chest=false,replay=false,autoKeys=false,respawn=false,autoEnter=false,dungeonMode='crypt',difficulty='normal',autoPotion=false,potionBelow=100,potionBatches=5,autoExecute=false,antiAfk=false,rejoin20=false,buyQty=10,prompt='Auto'}
 local selected, autoProfile, profiles = '', '', {}
 local folder = 'PetHuntParty/' .. tostring(game.PlaceId) .. '/' .. tostring(player.UserId)
 local persistent = type(readfile)=='function' and type(writefile)=='function' and type(isfile)=='function' and type(makefolder)=='function'
@@ -21,10 +21,8 @@ local function bounded(parent,name)
 end
 local controllers=bounded(bounded(bounded(player,'PlayerScripts'),'Client'),'Controllers')
 local target=require(bounded(controllers,'TargetController'))
-local combat=require(bounded(controllers,'CombatController'))
 local shared=bounded(RS,'Shared')
 local dungeonsConfig=require(bounded(shared.Config,'Dungeons'))
-local defs=require(bounded(bounded(shared,'Config'),'Monsters')).defs
 local function root()
     local char=player.Character
     local h=char and char:FindFirstChildOfClass('Humanoid')
@@ -34,44 +32,17 @@ end
 local function copy(t) return Http:JSONDecode(Http:JSONEncode(t)) end
 local function validate(t)
     assert(type(t)=='table','Invalid profile')
-    local clean=copy(config)
-    for _,k in ipairs({'stage','world','chest','skills','returnHome'}) do
-        assert(type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]
-    end
-    assert(type(t.boss)=='string' and #t.boss<=120,'Invalid boss');clean.boss=t.boss
-    assert(type(t.prompt)=='string' and #t.prompt<=200,'Invalid prompt');clean.prompt=t.prompt
-    assert(type(t.radius)=='number' and t.radius>=10 and t.radius<=5000,'Invalid radius');clean.radius=t.radius
-    assert(t.replay==nil or type(t.replay)=='boolean','Invalid replay');clean.replay=t.replay==true
-    assert(t.autoKeys==nil or type(t.autoKeys)=='boolean','Invalid autoKeys');clean.autoKeys=t.autoKeys==true
-    local qty=t.buyQty or 10;assert(type(qty)=='number' and qty%1==0 and qty>=1 and qty<=100,'Buy quantity must be 1-100');clean.buyQty=qty
-    assert(t.respawn==nil or type(t.respawn)=='boolean','Invalid respawn');clean.respawn=t.respawn==true
-    for _,k in ipairs({'autoEnter','autoPotion','autoExecute','antiAfk','rejoin20'}) do
+    local clean={}
+    for _,k in ipairs({'dungeonCombat','chest','replay','autoKeys','respawn','autoEnter','autoPotion','autoExecute','antiAfk','rejoin20','extendSearch'}) do
         assert(t[k]==nil or type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]==true
     end
+    clean.prompt=t.prompt or 'Auto';assert(type(clean.prompt)=='string' and #clean.prompt<=200,'Invalid prompt')
+    clean.buyQty=t.buyQty or 10;assert(type(clean.buyQty)=='number' and clean.buyQty%1==0 and clean.buyQty>=1 and clean.buyQty<=100,'Buy quantity must be 1-100')
     clean.dungeonMode=t.dungeonMode or 'crypt';assert(clean.dungeonMode=='crypt' or clean.dungeonMode=='endless' or clean.dungeonMode=='gold','Invalid dungeon mode')
     clean.difficulty=t.difficulty or 'normal';assert(clean.difficulty=='normal' or clean.difficulty=='hard','Invalid difficulty')
     clean.potionBelow=t.potionBelow or 100;assert(type(clean.potionBelow)=='number' and clean.potionBelow%1==0 and clean.potionBelow>=1 and clean.potionBelow<=100000,'Invalid potion threshold')
     clean.potionBatches=t.potionBatches or 5;assert(type(clean.potionBatches)=='number' and clean.potionBatches%1==0 and clean.potionBatches>=1 and clean.potionBatches<=100,'Invalid potion batches')
-    for _,k in ipairs({'field','dungeonCombat'}) do assert(t[k]==nil or type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]==true end
-    clean.movement={}
-    for _,mode in ipairs({'field','stage','world','dungeon'}) do
-        local m=(type(t.movement)=='table' and t.movement[mode]) or {}
-        assert(type(m)=='table','Invalid movement')
-        local side=m.side or 'Behind';assert(side=='Front' or side=='Below' or side=='Above' or side=='Behind','Invalid position')
-        local distance=m.distance or 3;assert(type(distance)=='number' and distance>=0 and distance<=100,'Distance must be 0-100')
-        local chosen=m.selected or {};assert(type(chosen)=='table','Invalid monster selection')
-        for id,on in pairs(chosen) do assert(type(id)=='string' and type(on)=='boolean','Invalid monster choice') end
-        clean.movement[mode]={enabled=m.enabled==true,side=side,distance=distance,selected=copy(chosen)}
-    end
-    for _,k in ipairs({'smartDistance','autoDodge','stuckRecovery','towerFastDodge'}) do assert(t[k]==nil or type(t[k])=='boolean','Invalid '..k);clean[k]=t[k]==true end
-    clean.stuckSeconds=t.stuckSeconds or 8;assert(type(clean.stuckSeconds)=='number' and clean.stuckSeconds>=3 and clean.stuckSeconds<=60,'Stuck seconds must be 3-60')
-    clean.position=false
-    if t.position then
-        assert(type(t.position)=='table' and t.position.place==game.PlaceId,'Position is for a different place')
-        assert(type(t.position.cf)=='table' and #t.position.cf==12,'Invalid position')
-        for _,n in ipairs(t.position.cf) do assert(type(n)=='number' and n==n and math.abs(n)<1e8,'Invalid coordinate') end
-        clean.position=copy(t.position)
-    end
+    clean.searchRadius=t.searchRadius or 250;assert(type(clean.searchRadius)=='number' and clean.searchRadius%1==0 and clean.searchRadius>=20 and clean.searchRadius<=1000,'Search radius must be 20-1000')
     return clean
 end
 local function safeName(s) return type(s)=='string' and #s>0 and #s<=40 and s:match('^[%w_-]+$') end
@@ -95,7 +66,7 @@ if persistent then
             end
         end
     end)
-    if not ok then startup='Config error: '..tostring(err); config.stage=false;config.world=false;config.chest=false end
+    if not ok then startup='Config error: '..tostring(err); config.dungeonCombat=false;config.chest=false end
 else startup='File API unavailable: profiles last this session only' end
 if env.PetHuntResumeConfig then
     local ok,value=pcall(validate,env.PetHuntResumeConfig);env.PetHuntResumeConfig=nil
@@ -106,6 +77,10 @@ local gui=Instance.new('ScreenGui');gui.Name='PetHuntPartyHub';gui.ResetOnSpawn=
 local function new(class,parent,props)
     local x=Instance.new(class)
     for k,v in pairs(props or {}) do x[k]=v end
+    if x:IsA('GuiObject') and not (props and props.LayoutOrder~=nil) and parent:FindFirstChildOfClass('UIListLayout') then
+        local order=(parent:GetAttribute('PetHuntLayoutOrder') or 0)+1
+        parent:SetAttribute('PetHuntLayoutOrder',order);x.LayoutOrder=order
+    end
     x.Parent=parent;return x
 end
 local black=Color3.fromRGB(30,30,30)
@@ -114,7 +89,7 @@ local window=new('Frame',gui,{Size=UDim2.fromOffset(760,540),Position=UDim2.new(
 local scale=new('UIScale',window,{Scale=1})
 local function resize() local cam=workspace.CurrentCamera;if cam then scale.Scale=math.min(1,(cam.ViewportSize.X-20)/760,(cam.ViewportSize.Y-30)/540) end end
 resize()
-local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.23',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
+local title=new('TextLabel',window,{Text='Pet Hunt Party  /  v0.33',Size=UDim2.new(1,-16,0,28),Position=UDim2.fromOffset(8,0),Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Active=true})
 new('Frame',window,{Position=UDim2.fromOffset(8,29),Size=UDim2.new(1,-16,0,1),BorderSizePixel=0,BackgroundColor3=Color3.fromRGB(48,48,48)})
 local status=new('TextLabel',window,{Position=UDim2.new(0,198,1,-41),Size=UDim2.new(1,-210,0,33),Text=startup,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,220),BackgroundTransparency=1})
 local function say(t) if running then status.Text=tostring(t) end end
@@ -129,23 +104,23 @@ local function page()
     new('UIListLayout',p,{Padding=UDim.new(0,7),SortOrder=Enum.SortOrder.LayoutOrder})
     return p
 end
-local farm,dungeon,settings=page(),page(),page();farm.Visible=true
+local dungeon,settings=page(),page();dungeon.Visible=true
 local rerollPage=page()
 local tabs=new('Frame',window,{Position=UDim2.fromOffset(8,36),Size=UDim2.new(0,176,1,-44),BackgroundColor3=Color3.fromRGB(27,27,27),BorderColor3=Color3.fromRGB(49,49,49)})
 do
     local tabButtons={}
     local function selectPage(chosen)
-        farm.Visible=chosen==farm;dungeon.Visible=chosen==dungeon;settings.Visible=chosen==settings;rerollPage.Visible=chosen==rerollPage
+        dungeon.Visible=chosen==dungeon;settings.Visible=chosen==settings;rerollPage.Visible=chosen==rerollPage
         for page,control in pairs(tabButtons) do control.TextColor3=page==chosen and red or Color3.fromRGB(170,170,170) end
     end
-    for index,entry in ipairs({{farm,'Farm'},{dungeon,'Auto Farm Dungeon'},{rerollPage,'Gear Reroll'},{settings,'Settings'}}) do
+    for index,entry in ipairs({{dungeon,'Auto Farm Dungeon'},{rerollPage,'Gear Reroll'},{settings,'Settings'}}) do
         local page=entry[1]
         local control=button(tabs,entry[2],function() selectPage(page) end)
         control.Position=UDim2.fromOffset(4,8+(index-1)*35);control.Size=UDim2.new(1,-8,0,29)
         control.BackgroundTransparency=1;control.BorderSizePixel=0;control.TextSize=12
         tabButtons[page]=control
     end
-    selectPage(farm)
+    selectPage(dungeon)
     new('TextLabel',tabs,{Text='RSHIFT  hide / show',Position=UDim2.new(0,8,1,-25),Size=UDim2.new(1,-16,0,18),BackgroundTransparency=1,Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(105,105,105)})
 end
 local function label(p,text)
@@ -169,108 +144,45 @@ local function registerDropdown(list,trigger)
         if list.Visible then for _,d in ipairs(dropdowns) do if d.list~=list then d.list.Visible=false end end end
     end)
 end
-connect(UIS.InputBegan,function(input)
-    if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch then return end
-    local inset=game:GetService('GuiService'):GetGuiInset()
-    local point=Vector2.new(input.Position.X,input.Position.Y)-inset
-    local function inside(g)
-        return g and point.X>=g.AbsolutePosition.X and point.Y>=g.AbsolutePosition.Y and point.X<=g.AbsolutePosition.X+g.AbsoluteSize.X and point.Y<=g.AbsolutePosition.Y+g.AbsoluteSize.Y
-    end
-    for _,d in ipairs(dropdowns) do if d.list.Visible and not inside(d.list) and not inside(d.trigger) then d.list.Visible=false end end
-end)
-local movementRuntime={}
 do
-    local align,orientation,attachment,humanoid,old,heartbeat,goal,smoothed,part,offset
-    function movementRuntime.release()
-        if heartbeat then heartbeat:Disconnect();heartbeat=nil end
-        if align then align:Destroy();align=nil end
-        if orientation then orientation:Destroy();orientation=nil end
-        if attachment then attachment:Destroy();attachment=nil end
-        if humanoid and humanoid.Parent and old then
-            humanoid.AutoRotate=old.rotate;humanoid.WalkSpeed=old.speed;humanoid.JumpPower=old.power;humanoid.JumpHeight=old.height
+    local presses={}
+    local function hits(input,control)
+        if not control or not control.Parent then return false end
+        local raw=Vector2.new(input.Position.X,input.Position.Y)
+        local inset=game:GetService('GuiService'):GetGuiInset()
+        local function inside(point)
+            local pos,size=control.AbsolutePosition,control.AbsoluteSize
+            return point.X>=pos.X and point.Y>=pos.Y and point.X<=pos.X+size.X and point.Y<=pos.Y+size.Y
         end
-        humanoid=nil;old=nil;part=nil;offset=nil;goal=nil;smoothed=nil
+        -- Executors/UI roots can expose positions with or without the top inset.
+        if inside(raw) or inside(raw-inset) then return true end
+        local ok,objects=pcall(function() return player.PlayerGui:GetGuiObjectsAtPosition(raw.X,raw.Y) end)
+        if ok then for _,object in ipairs(objects) do if object==control or object:IsDescendantOf(control) then return true end end end
+        return false
     end
-    function movementRuntime.hold(r,h,position,targetPart)
-        if not attachment or attachment.Parent~=r then
-            movementRuntime.release();humanoid=h
-            old={rotate=h.AutoRotate,speed=h.WalkSpeed,power=h.JumpPower,height=h.JumpHeight}
-            h.AutoRotate=false;h.WalkSpeed=0;h.JumpPower=0;h.JumpHeight=0;h:Move(Vector3.new())
-            r.AssemblyLinearVelocity=Vector3.new();r.AssemblyAngularVelocity=Vector3.new()
-            attachment=Instance.new('Attachment');attachment.Name='PetHuntFarmAttachment';attachment.Parent=r
-            align=Instance.new('AlignPosition');align.Name='PetHuntFarmPosition';align.Mode=Enum.PositionAlignmentMode.OneAttachment
-            align.Attachment0=attachment;align.MaxForce=1e9;align.MaxVelocity=40;align.Responsiveness=40;align.RigidityEnabled=true
-            align.Position=position;align.Parent=r
-            orientation=Instance.new('AlignOrientation');orientation.Mode=Enum.OrientationAlignmentMode.OneAttachment;orientation.Attachment0=attachment
-            orientation.RigidityEnabled=true;orientation.MaxTorque=1e9;orientation.CFrame=r.CFrame.Rotation;orientation.Parent=r
-            smoothed=position
-            heartbeat=game:GetService('RunService').Heartbeat:Connect(function(dt)
-                if not running or not r.Parent or not part or not part.Parent or h.Health<=0 then movementRuntime.release();return end
-                local desired=part.Position+offset
-                if (desired-smoothed).Magnitude>.12 then smoothed=smoothed:Lerp(desired,1-math.exp(-12*math.min(dt,.1))) end
-                align.Position=smoothed
-                h:Move(Vector3.new());h.Jump=false
-            end)
+    connect(UIS.InputBegan,function(input)
+        if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch then return end
+        local snapshot={}
+        for _,d in ipairs(dropdowns) do
+            if d.list.Visible then snapshot[d]=hits(input,d.list) or hits(input,d.trigger) end
         end
-        part=targetPart
-        offset=position-targetPart.Position
-    end
+        presses[input]=snapshot
+    end)
+    connect(UIS.InputEnded,function(input)
+        local snapshot=presses[input];presses[input]=nil
+        if not snapshot then return end
+        -- Let TextButton.Activated run before outside-click dismissal.
+        task.defer(function()
+            if not running then return end
+            for d,startedInside in pairs(snapshot) do
+                if d.list.Visible and not startedInside and not hits(input,d.list) and not hits(input,d.trigger) then d.list.Visible=false end
+            end
+        end)
+    end)
 end
 local function input(p,text)
     return new('TextBox',p,{Size=UDim2.new(1,0,0,26),Text=text,PlaceholderText=text,ClearTextOnFocus=false,Font=Enum.Font.Code,TextSize=13,TextColor3=Color3.new(1,1,1),BackgroundColor3=Color3.fromRGB(31,31,31),BorderColor3=Color3.fromRGB(55,55,55)})
 end
-do
-    local function movementPanel(parent,mode,title)
-        if not config.movement[mode] then config.movement[mode]={enabled=false,side='Behind',distance=3,selected={}} end
-        local function settingsForMode()
-            config.movement=config.movement or {}
-            config.movement[mode]=config.movement[mode] or {enabled=false,side='Behind',distance=3,selected={}}
-            return config.movement[mode]
-        end
-        label(parent,'-- '..title..' / Movement --')
-        local enabled,side,chosenButton
-        enabled=button(parent,'',function() local v=settingsForMode();v.enabled=not v.enabled;refresh() end)
-        local sides={'Front','Below','Above','Behind'}
-        side=button(parent,'',function() local v=settingsForMode();v.side=sides[((table.find(sides,v.side) or 0)%4)+1];refresh() end)
-        label(parent,'Gap from monster edge (studs, 0-100)')
-        local gap=input(parent,tostring(settingsForMode().distance))
-        connect(gap.FocusLost,guard(function() local n=tonumber(gap.Text);assert(n and n>=0 and n<=100,'Distance must be 0-100');settingsForMode().distance=n end))
-        local list=new('ScrollingFrame',parent,{Size=UDim2.new(1,0,0,180),BackgroundColor3=black,BorderColor3=red,Visible=false,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=5})
-        new('UIListLayout',list,{Padding=UDim.new(0,5),SortOrder=Enum.SortOrder.Name})
-        local function rebuild()
-            for _,c in ipairs(list:GetChildren()) do if c:IsA('TextButton') then c:Destroy() end end
-            local ids={}
-            for id,d in pairs(defs) do
-                local include=mode=='dungeon' and d.dungeon~=nil or mode=='stage' and d.role=='boss' and not d.dungeonBoss or mode=='field' and d.role~='boss' and not d.dungeon or mode=='world'
-                if include then table.insert(ids,id) end
-            end
-            -- Include current replicated models even when config metadata differs.
-            local monsters=workspace:FindFirstChild('Monsters')
-            if monsters then for _,m in ipairs(monsters:GetChildren()) do local id=m:GetAttribute('MonsterId');if id and not table.find(ids,id) then table.insert(ids,id) end end end
-            if #ids==0 then for id in pairs(defs) do table.insert(ids,id) end end
-            table.sort(ids)
-            local all=button(list,'Clear selection (all eligible monsters)',function() settingsForMode().selected={};rebuild() end);all.Name='000'
-            for _,id in ipairs(ids) do
-                local d=defs[id];local text=(d and d.name or id)..' ['..id..']'
-                local row=button(list,(settingsForMode().selected[id] and '[x] ' or '[ ] ')..text,function() local v=settingsForMode();v.selected[id]=not v.selected[id];rebuild() end)
-                row.Name=id
-            end
-        end
-        chosenButton=button(parent,'Monsters: multi-select dropdown v',function() list.Visible=not list.Visible;if list.Visible then rebuild() end end)
-        registerDropdown(list,chosenButton)
-        table.insert(refreshers,function()
-            local v=settingsForMode();enabled.Text=(v.enabled and '[x] ' or '[ ] ')..'Movement Farm';side.Text='Position: '..v.side..'  >';gap.Text=tostring(v.distance)
-            if list.Visible then rebuild() end
-        end)
-    end
-    toggle(farm,'field','Auto Farm Selected Monsters')
-    movementPanel(farm,'field','Monsters')
-    movementPanel(farm,'stage','Boss Stage')
-    movementPanel(farm,'world','World Boss')
-    toggle(dungeon,'dungeonCombat','Auto Farm Dungeon Monsters')
-    movementPanel(dungeon,'dungeon','Dungeon')
-end
-
 local nestedScrollLocks={}
 local function setupNestedScroll(parent,child)
     child.Active=true;child.ScrollingEnabled=true
@@ -363,7 +275,13 @@ do
     local function lineText(option)
         if not option then return '(empty option)' end
         local ok,text=pcall(equipment.lineText,option)
-        return ok and tostring(text) or 'Unknown mod'
+        local result=ok and tostring(text) or 'Unknown mod'
+        if type(equipment.isLegacy)=='function' and equipment.isLegacy(option.key) then return result..' [Legacy]' end
+        if type(equipment.lineWorks)=='function' and not equipment.lineWorks(option.key,player:GetAttribute('Class')) then
+            local classes=type(equipment.lineClasses)=='function' and equipment.lineClasses(option.key)
+            if classes then result=result..' ['..table.concat(classes,'/')..' only]' end
+        end
+        return result
     end
     label(rerollPage,'-- Gear / Current Mods --')
     label(rerollPage,'Select an item below; [WORN] marks equipped gear')
@@ -449,6 +367,7 @@ do
         bounded(bounded(RS,'Remotes'),'Gear'):FireServer('reroll',selectedUid,indices)
     end)
     label(rerollPage,'-- Auto Reroll / stop on an OPEN line --')
+    label(rerollPage,'Select gear first: only rollable mods for that gear/class appear')
     local targets={}
     local greatOnly=true
     local maxRolls=50
@@ -458,6 +377,14 @@ do
     local stats=require(bounded(shared.Config,'Stats'))
     local rangeControls={}
     local rangeDefinition=nil
+    local rangeClass=nil
+    local function getRollablePool(definition,className,lineOdds,isLegacy)
+        local pool={}
+        for _,odds in ipairs(lineOdds(definition,className)) do
+            if type(odds.key)=='string' and not (isLegacy and isLegacy(odds.key)) then pool[odds.key]=odds end
+        end
+        return pool
+    end
     local function gameBounds(option,definition,scaleFn,shownFn)
         local scale=scaleFn(definition)
         local flat=option.max>=1
@@ -481,10 +408,11 @@ do
     label(rerollPage,'Ranges filter rolls; they do not change RNG')
     label(rerollPage,'Percent mods: enter 5 for 5%; Cooldown uses positive magnitude')
     for index,option in ipairs(equipment.options) do
-        local container=new('Frame',targetList,{Size=UDim2.new(1,-5,0,88),BackgroundTransparency=1,LayoutOrder=index})
+        local container=new('Frame',targetList,{Size=UDim2.new(1,-5,0,88),BackgroundTransparency=1,LayoutOrder=index,Visible=false})
         local row
         local displayName=option.key
-        for _,odds in ipairs(equipment.lineOdds({level=1})) do if odds.key==option.key then displayName=odds.name end end
+        local ok,text=pcall(equipment.lineText,{key=option.key,value=0})
+        if ok then displayName=tostring(text):match('^(.+) %S+$') or option.key end
         row=button(container,'[ ] '..displayName,function()
             assert(not autoActive,'Stop Auto Reroll before changing targets')
             targets[option.key]=not targets[option.key] or nil
@@ -494,18 +422,27 @@ do
         local allowed=label(container,'Select gear to see game range');allowed.Position=UDim2.fromOffset(0,28);allowed.TextSize=11
         local minBox=input(container,'');minBox.PlaceholderText='Min (blank = game minimum)';minBox.Position=UDim2.fromOffset(0,54);minBox.Size=UDim2.new(.5,-4,0,26);minBox.TextSize=11
         local maxBox=input(container,'');maxBox.PlaceholderText='Max (blank = game maximum)';maxBox.Position=UDim2.new(.5,4,0,54);maxBox.Size=UDim2.new(.5,-4,0,26);maxBox.TextSize=11
-        rangeControls[option.key]={min=minBox,max=maxBox,label=allowed,option=option}
+        rangeControls[option.key]={min=minBox,max=maxBox,label=allowed,option=option,container=container,button=row}
         local function keepFrozen()
             if autoActive then minBox.Text=minBox:GetAttribute('StartText') or '';maxBox.Text=maxBox:GetAttribute('StartText') or '' end
         end
         connect(minBox.FocusLost,keepFrozen);connect(maxBox.FocusLost,keepFrozen)
     end
     updateRanges=function(definition)
-        local changed=rangeDefinition~=definition
-        rangeDefinition=definition
-        for _,control in pairs(rangeControls) do
-            local lo,hi,_,step,flat=gameBounds(control.option,definition,equipment.lineScale,stats.shown)
-            control.label.Text=('Game: %g - %g%s | step %g'):format(lo,hi,flat and '' or '%',step)
+        local className=player:GetAttribute('Class')
+        local changed=rangeDefinition~=definition or rangeClass~=className
+        rangeDefinition=definition;rangeClass=className
+        local pool=getRollablePool(definition,className,equipment.lineOdds,equipment.isLegacy)
+        for key,control in pairs(rangeControls) do
+            local odds=pool[key]
+            control.container.Visible=odds~=nil
+            control.button.Active=odds~=nil and not autoActive
+            if not odds then targets[key]=nil end
+            control.button.Text=(targets[key] and '[x] ' or '[ ] ')..(odds and (odds.name..(control.option.max<1 and ' %' or '')) or key)
+            if odds then
+                local lo,hi,_,step,flat=gameBounds(control.option,definition,equipment.lineScale,stats.shown)
+                control.label.Text=('Game: %g - %g%s | step %g'):format(lo,hi,flat and '' or '%',step)
+            end
             if changed then control.min.Text='';control.max.Text='' end
         end
     end
@@ -517,7 +454,7 @@ do
     label(rerollPage,'Maximum rolls (1-1000)')
     local rollsInput=input(rerollPage,tostring(maxRolls))
     local progress=label(rerollPage,'Auto Reroll: stopped')
-    local function autoHit(definition,piece,locked,wanted,onlyGreat,isGreat)
+    local function autoHit(definition,piece,locked,wanted,onlyGreat,isGreat,allowedPool)
         for index=1,definition.lines do
             local option=piece.options and piece.options[index]
             local criterion=option and wanted[option.key]
@@ -526,7 +463,7 @@ do
                 local value=type(option.value)=='number' and option.value*criterion.factor or nil
                 rangeMatches=value~=nil and value>=criterion.min-1e-6 and value<=criterion.max+1e-6
             end
-            if option and not locked[index] and (next(wanted)==nil or criterion) and rangeMatches and (not onlyGreat or isGreat(definition,option)) then return index,option end
+            if option and (not allowedPool or allowedPool[option.key]) and not locked[index] and (next(wanted)==nil or criterion) and rangeMatches and (not onlyGreat or isGreat(definition,option)) then return index,option end
         end
     end
     button(rerollPage,'START Auto Reroll',function()
@@ -538,11 +475,15 @@ do
         local uid=selectedUid;local piece=uid and state.gear[uid];local definition=piece and equipment.defs[piece.id]
         assert(definition and (definition.lines or 0)>0,'Select a rerollable item')
         assert(type(equipment.isGreat)=='function','Game Great quality check unavailable')
+        local startClass=player:GetAttribute('Class')
+        local frozenPool=getRollablePool(definition,startClass,equipment.lineOdds,equipment.isLegacy)
+        assert(next(frozenPool)~=nil,'No rerollable mods for this gear/class')
         local frozenLocks={};for i,on in pairs(locks) do frozenLocks[i]=on end
         local indices=lockedIndices(frozenLocks,definition.lines,equipment.reroll.maxLocks)
         local frozenTargets={}
         for key,on in pairs(targets) do
             if on then
+                assert(frozenPool[key],'Target mod no longer rollable: '..key..'; reselect gear')
                 local control=rangeControls[key]
                 local lo,hi,factor,step=gameBounds(control.option,definition,equipment.lineScale,stats.shown)
                 local minValue=control.min.Text=='' and lo or tonumber(control.min.Text)
@@ -563,6 +504,7 @@ do
             local message='Stopped'
             local ok,err=pcall(function()
                 while running and not autoStop and rolls<limit do
+                    assert(player:GetAttribute('Class')==startClass,'Class changed; reselect targets before restarting')
                     assert(readGear(),'Gear data unavailable')
                     local current=state.gear[uid]
                     assert(current and current.id==piece.id and selectedUid==uid,'Selected item changed or disappeared')
@@ -583,7 +525,7 @@ do
                     assert(readGear(),'Could not read rerolled gear')
                     current=state.gear[uid];assert(current,'Item disappeared')
                     rolls=rolls+1;spent=spent+cost
-                    local index,option=autoHit(definition,current,frozenLocks,frozenTargets,onlyGreat,equipment.isGreat)
+                    local index,option=autoHit(definition,current,frozenLocks,frozenTargets,onlyGreat,equipment.isGreat,frozenPool)
                     progress.Text=('Auto Reroll: %d/%d | Gold: %s'):format(rolls,limit,tostring(spent))
                     if index then
                         message=('FOUND line %d: %s | %d rolls | %s Gold'):format(index,lineText(option),rolls,tostring(spent))
@@ -634,12 +576,15 @@ do
         end)
     end)
     local lastPoll=0
+    local lastGearClass=player:GetAttribute('Class')
     rerollRuntime.step=function()
         if os.clock()-lastPoll<.5 then return end;lastPoll=os.clock()
         local inventory=player:FindFirstChild('Inventory')
         resources.Text=('Gold: %s | Lock Charm: %s'):format(tostring(player:GetAttribute('Gold') or 0),tostring(inventory and inventory:GetAttribute(equipment.reroll.charm) or 0))
         local raw=readGear()
-        if raw and raw~=lastData then
+        local classChanged=lastGearClass~=player:GetAttribute('Class')
+        lastGearClass=player:GetAttribute('Class')
+        if raw and (raw~=lastData or classChanged) then
             local ok,err=pcall(rebuild)
             if ok then lastData=raw else readStatus.Text='Gear panel error: '..tostring(err) end
         elseif not raw then readStatus.Text='Waiting for player Gear / GearState data...' end
@@ -661,33 +606,6 @@ do
     end)
 end
 
-label(farm,'-- Boss automation --')
-toggle(farm,'stage','Auto Farm Boss Stage')
-toggle(farm,'world','Auto Farm World Boss (priority)')
-toggle(farm,'skills','Use unlocked skills 1-4 (may spend SP / Gold)')
-local bosses={'Nearest'}
-for id,d in pairs(defs) do if d.role=='boss' and not d.dungeonBoss then table.insert(bosses,id) end end
-table.sort(bosses,function(x,y) if x=='Nearest' then return true elseif y=='Nearest' then return false else return x<y end end)
-local bossButton
-bossButton=button(farm,'',function() config.boss=bosses[((table.find(bosses,config.boss) or 0)%#bosses)+1];refresh() end)
-table.insert(refreshers,function() bossButton.Text='Stage boss: '..config.boss..'  >' end)
-label(farm,'Stage search radius around saved point (studs)')
-local radius=input(farm,tostring(config.radius))
-connect(radius.FocusLost,guard(function() local n=tonumber(radius.Text);assert(n and n>=10 and n<=5000,'Radius must be 10-5000');config.radius=n end))
-table.insert(refreshers,function() radius.Text=tostring(config.radius) end)
-label(farm,'-- Farm position --')
-button(farm,'Save Current Position',function()
-    local r=root();assert(r,'Character is not ready')
-    assert(not player:GetAttribute('DungeonRun'),'Save a field position outside a dungeon')
-    config.position={place=game.PlaceId,cf={r.CFrame:GetComponents()}};say('Position captured. Save Config to keep it across sessions.')
-end)
-local function goHome()
-    assert(config.position and config.position.place==game.PlaceId,'No position saved for this place')
-    assert(not player:GetAttribute('DungeonRun'),'Return is disabled inside a dungeon')
-    local r=root();assert(r,'Character is not ready');r.CFrame=CFrame.new(table.unpack(config.position.cf))
-end
-button(farm,'Return to Saved Position',goHome)
-toggle(farm,'returnHome','Return after World Boss')
 local keyBusy,keyLastCount,keyLastAttempt=false,nil,-math.huge
 local keyMessage='Ready'
 local function keyCount()
@@ -738,35 +656,100 @@ local function purchaseKeys(quantity,automatic)
         say(keyMessage)
     end)
 end
+local dungeonAuto={owned=false}
+function dungeonAuto.stop()
+    if dungeonAuto.owned then target.setAuto(false);target.set(nil);dungeonAuto.owned=false end
+end
+function dungeonAuto.step()
+    if config.dungeonCombat and player:GetAttribute('DungeonRun') then
+        if not target.auto then target.setAuto(true) end
+        dungeonAuto.owned=true
+        if config.extendSearch and dungeonAuto.select then dungeonAuto.select() end
+    else dungeonAuto.stop() end
+end
+toggle(dungeon,'dungeonCombat','Auto Farm Dungeon Monsters (native game Auto)')
+do
+    local zones=require(bounded(shared.Config,'Zones'))
+    local chosen=nil
+    toggle(dungeon,'extendSearch','Extended Auto Search (experimental)')
+    label(dungeon,'Target search radius: 20-1000 studs (not weapon range)')
+    local radius=input(dungeon,tostring(config.searchRadius))
+    connect(radius.FocusLost,guard(function()
+        local n=tonumber(radius.Text);assert(n and n%1==0 and n>=20 and n<=1000,'Radius must be 20-1000')
+        config.searchRadius=n
+    end))
+    table.insert(refreshers,function() radius.Text=tostring(config.searchRadius) end)
+    local rangeStatus=label(dungeon,'Extended search: Off')
+    local function eligible(m,r,area,folder)
+        return m and m.Parent==folder and m:IsA('Model') and m.PrimaryPart and (m:GetAttribute('Health') or 0)>0
+            and (m.PrimaryPart.Position-r.Position).Magnitude<=config.searchRadius
+            and area and zones.dungeonAt(m.PrimaryPart.Position)==area
+    end
+    dungeonAuto.select=function()
+        local r=root();local folder=workspace:FindFirstChild('Monsters')
+        if not r or not folder then return end
+        local area=zones.dungeonAt(r.Position)
+        if not area then rangeStatus.Text='Extended search: waiting for dungeon area';return end
+        if not eligible(chosen,r,area,folder) then
+            chosen=nil;local best=math.huge
+            for _,m in ipairs(folder:GetChildren()) do
+                if eligible(m,r,area,folder) then
+                    local distance=(m.PrimaryPart.Position-r.Position).Magnitude
+                    if distance<best then chosen=m;best=distance end
+                end
+            end
+        end
+        if chosen then
+            if target.current~=chosen then target.set(chosen) end
+            rangeStatus.Text=('Search %d studs | target %.1f studs'):format(config.searchRadius,(chosen.PrimaryPart.Position-r.Position).Magnitude)
+        else rangeStatus.Text='Extended search: no replicated monster in same dungeon area' end
+    end
+end
+
+
 label(dungeon,'-- Auto Enter Dungeon --')
 toggle(dungeon,'autoEnter','Auto Enter Dungeon (remote)')
 local modeButton,difficultyButton
-local modeNames={crypt="Grim Antler's Crypt",gold='Golden Vault [unavailable]',endless='Endless Tower'}
+local modeNames={crypt="Grim Antler's Crypt",gold='Golden Vault',endless='Endless Tower'}
 local modeList={'crypt','gold','endless'}
-local modeOptions=new('Frame',dungeon,{Size=UDim2.new(1,0,0,95),BackgroundTransparency=1,Visible=false})
-new('UIListLayout',modeOptions,{Padding=UDim.new(0,6)})
-for _,id in ipairs(modeList) do
-    local choice=button(modeOptions,modeNames[id],function()
-        if id=='gold' then say('Golden Vault is not enabled');return end
-        config.dungeonMode=id;modeOptions.Visible=false;refresh()
-    end)
-    if id=='gold' then choice.TextColor3=Color3.fromRGB(100,100,100);choice.Active=false end
-end
+local modeOptions
 modeButton=button(dungeon,'',function() modeOptions.Visible=not modeOptions.Visible end)
-local difficultyOptions=new('Frame',dungeon,{Size=UDim2.new(1,0,0,60),BackgroundTransparency=1,Visible=false})
-new('UIListLayout',difficultyOptions,{Padding=UDim.new(0,6)})
-for _,id in ipairs({'normal','hard'}) do button(difficultyOptions,id=='normal' and 'Normal' or 'Hard',function() config.difficulty=id;difficultyOptions.Visible=false;refresh() end) end
-difficultyButton=button(dungeon,'',function() difficultyOptions.Visible=not difficultyOptions.Visible end)
+modeOptions=new('Frame',dungeon,{Size=UDim2.new(1,0,0,95),BackgroundTransparency=1,Visible=false})
+new('UIListLayout',modeOptions,{Padding=UDim.new(0,6),SortOrder=Enum.SortOrder.LayoutOrder})
+for index,id in ipairs(modeList) do
+    local choice=button(modeOptions,modeNames[id],function()
+        config.dungeonMode=id
+        if id=='gold' then config.difficulty='normal' end
+        modeOptions.Visible=false;refresh()
+    end)
+    choice.LayoutOrder=index
+end
+local difficultyOptions
+local difficultyStatus=label(dungeon,'')
+difficultyButton=button(dungeon,'',function()
+    if config.dungeonMode=='crypt' then difficultyOptions.Visible=not difficultyOptions.Visible end
+end)
+difficultyOptions=new('Frame',dungeon,{Size=UDim2.new(1,0,0,60),BackgroundTransparency=1,Visible=false})
+new('UIListLayout',difficultyOptions,{Padding=UDim.new(0,6),SortOrder=Enum.SortOrder.LayoutOrder})
+for index,id in ipairs({'normal','hard'}) do
+    local choice=button(difficultyOptions,id=='normal' and 'Normal (Lv.50)' or 'Hard (Lv.90)',function()
+        config.difficulty=id;difficultyOptions.Visible=false;refresh()
+    end)
+    choice.LayoutOrder=index
+end
 registerDropdown(modeOptions,modeButton);registerDropdown(difficultyOptions,difficultyButton)
 table.insert(refreshers,function()
     modeButton.Text='Dungeon: '..modeNames[config.dungeonMode]..'  v'
-    difficultyButton.Visible=config.dungeonMode=='crypt'
-    difficultyButton.Text='Difficulty: '..config.difficulty..'  v'
-    if config.dungeonMode~='crypt' then difficultyOptions.Visible=false end
+    local crypt=config.dungeonMode=='crypt'
+    difficultyButton.Visible=crypt;difficultyStatus.Visible=not crypt
+    difficultyButton.Text='Difficulty: '..(config.difficulty=='hard' and 'Hard' or 'Normal')..'  v'
+    difficultyStatus.Text=config.dungeonMode=='gold' and 'Difficulty: Normal (scales with party)' or 'Difficulty: Ranked'
+    if not crypt then difficultyOptions.Visible=false end
 end)
 local enterDisplay=label(dungeon,'Entry: Off')
 local function entryArgs(mode,difficulty)
     if mode=='crypt' and (difficulty=='normal' or difficulty=='hard') then return 'crypt',difficulty end
+    if mode=='gold' then return 'gold','normal' end
     if mode=='endless' then return 'endless','ranked' end
 end
 local enterBusy,lastEnter=false,-math.huge
@@ -777,6 +760,13 @@ local function stepEnter()
     if (player:GetAttribute('DownUntil') or 0)>workspace:GetServerTimeNow() then return end
     local mode,diff=entryArgs(config.dungeonMode,config.difficulty)
     if not mode then enterDisplay.Text='Entry: selected mode unavailable';return end
+    local dungeonDefinition=dungeonsConfig.byId[mode]
+    if dungeonDefinition and dungeonDefinition.soon then
+        local opensAt=mode=='gold' and dungeonsConfig.vaultOpensAt or mode=='endless' and dungeonsConfig.towerOpensAt
+        local remaining=type(opensAt)=='number' and math.max(0,math.ceil(opensAt-workspace:GetServerTimeNow())) or nil
+        enterDisplay.Text=remaining and ('Entry: dungeon opens in '..remaining..'s') or 'Entry: dungeon not open yet'
+        return
+    end
     if enterBusy or os.clock()-lastEnter<10 then return end
     enterBusy=true;lastEnter=os.clock();enterDisplay.Text='Entry: requesting '..mode..' / '..diff
     task.spawn(function()
@@ -870,7 +860,7 @@ end
 label(dungeon,'-- Auto Farm Dungeon --')
 toggle(dungeon,'respawn','Auto Respawn when knocked out / HP = 0')
 local respawnDisplay=label(dungeon,'Respawn: Off')
-toggle(dungeon,'chest','Open Boss Chest (Hold E)')
+toggle(dungeon,'chest','Walk to Boss Chest + Hold E')
 toggle(dungeon,'replay','Auto Replay after chest opens (3 seconds)')
 label(dungeon,'Replay waits for server confirmation + visible popup')
 local promptChoices={'Auto'}
@@ -966,10 +956,62 @@ do
 end
 
 label(settings,'RSHIFT: show / hide | Drag title to move')
+local chestWalk={prompt=nil,waypoints=nil,index=1,lastPlan=-math.huge,lastMove=-math.huge}
+local function chestInReach(distance,maximum)
+    return type(maximum)=='number' and maximum>0 and distance<=math.max(0,maximum-.5)
+end
+local function waypointReached(dx,dy,dz)
+    return dx*dx+dz*dz<=2.5*2.5 and math.abs(dy)<=7
+end
+function chestWalk.cancel()
+    if chestWalk.prompt then local r,h=root();if r then h:MoveTo(r.Position) end end
+    chestWalk.prompt=nil;chestWalk.waypoints=nil;chestWalk.index=1
+end
+function chestWalk.step(chest,r,h)
+    local prompt=chest.prompt
+    if target.auto then target.setAuto(false) end
+    if target.current then target.set(nil) end
+    local distance=(r.Position-chest.pos).Magnitude
+    if chestInReach(distance,prompt.MaxActivationDistance) then chestWalk.cancel();return true end
+    if chestWalk.prompt~=prompt then
+        chestWalk.cancel();chestWalk.prompt=prompt;chestWalk.lastPlan=-math.huge
+    end
+    local now=os.clock()
+    if not chestWalk.waypoints or now-chestWalk.lastPlan>=3 then
+        chestWalk.lastPlan=now
+        local offset=r.Position-chest.pos;offset=Vector3.new(offset.X,0,offset.Z)
+        local direction=offset.Magnitude>.01 and offset.Unit or Vector3.new(0,0,1)
+        local reach=math.max(1,prompt.MaxActivationDistance)
+        local goal=chest.pos+direction*math.min(3,reach*.5)
+        local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances={player.Character}
+        local floor=workspace:Raycast(goal+Vector3.new(0,12,0),Vector3.new(0,-40,0),params)
+        if floor and floor.Normal.Y>.5 then goal=floor.Position end
+        local path=game:GetService('PathfindingService'):CreatePath({AgentRadius=2,AgentHeight=5,AgentCanJump=true,WaypointSpacing=3})
+        local ok=pcall(function() path:ComputeAsync(r.Position,goal) end)
+        if not running or not config.chest or not prompt.Parent or h.Health<=0 then chestWalk.cancel();return false end
+        chestWalk.waypoints=ok and path.Status==Enum.PathStatus.Success and path:GetWaypoints() or {{Position=goal}}
+        chestWalk.index=1;chestWalk.lastMove=-math.huge
+    end
+    local points=chestWalk.waypoints
+    local point=points and points[chestWalk.index]
+    while point do
+        local delta=r.Position-point.Position
+        if not waypointReached(delta.X,delta.Y,delta.Z) then break end
+        chestWalk.index=chestWalk.index+1;point=points[chestWalk.index]
+    end
+    if not point then chestWalk.waypoints=nil;return false end
+    if now-chestWalk.lastMove>=.7 then
+        if point.Action==Enum.PathWaypointAction.Jump then h.Jump=true end
+        h:MoveTo(point.Position);chestWalk.lastMove=now
+    end
+    say(('Walking to boss chest... %.1f studs'):format(distance))
+    return false
+end
 local function releasePrompt() if activePrompt then pcall(function() activePrompt:InputHoldEnd() end);activePrompt=nil end end
 local function stop()
     if not running then return end
-    running=false;releasePrompt();movementRuntime.release();pcall(function() target.setAuto(false) end)
+    running=false;releasePrompt();chestWalk.cancel();pcall(dungeonAuto.stop)
     for _,c in ipairs(connections) do c:Disconnect() end
     pcall(function() target.set(nil) end)
     local r,h=root();if r then h:MoveTo(r.Position) end
@@ -985,261 +1027,32 @@ connect(UIS.InputEnded,function(i) if i.UserInputType==Enum.UserInputType.MouseB
 connect(UIS.InputChanged,function(i) if dragging and (i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then local d=(i.Position-startMouse)/scale.Scale;window.Position=startPos+UDim2.fromOffset(d.X,d.Y) end end)
 connect(UIS.InputBegan,function(i,processed) if not processed and i.KeyCode==Enum.KeyCode.RightShift then window.Visible=not window.Visible;resize() end end)
 refresh()
-local function alive(m) return m and m.Parent and m:IsA('Model') and m.PrimaryPart and (m:GetAttribute('Health') or 0)>0 end
-local function eligibleSelection(mode,m)
-    local movement=config.movement[mode]
-    local chosen=movement and movement.selected or {}
-    local any=false;for _,on in pairs(chosen) do if on then any=true;break end end
-    return not any or chosen[m:GetAttribute('MonsterId')]==true
+local chestZones=require(bounded(shared.Config,'Zones'))
+local function chestCandidateAllowed(distance,height,sameArea,hasArea)
+    if sameArea then return distance<=1500 and math.abs(height)<=150 end
+    return not hasArea and distance<=300 and math.abs(height)<=80
 end
-local function choose(r)
-    local folder=workspace:FindFirstChild('Monsters');if not folder then return end
-    local candidates={};local inDungeon=player:GetAttribute('DungeonRun')
-    local origin=config.position and Vector3.new(table.unpack(config.position.cf,1,3)) or r.Position
-    for _,m in ipairs(folder:GetChildren()) do
-        if alive(m) and not (movementRuntime.skip and movementRuntime.skip[m] and movementRuntime.skip[m]>os.clock()) then
-            local dist=(r.Position-m.PrimaryPart.Position).Magnitude
-            local id=m:GetAttribute('MonsterId');local d=defs[id];local mode
-            if inDungeon then
-                if config.dungeonCombat and dist<=350 then mode='dungeon' end
-            elseif m:GetAttribute('WorldBoss') then
-                if config.world then mode='world' end
-            elseif d and d.role=='boss' and not d.dungeonBoss then
-                if config.stage and (config.boss=='Nearest' or id==config.boss) and (origin-m.PrimaryPart.Position).Magnitude<=config.radius then mode='stage' end
-            elseif config.field and d and not d.dungeonBoss and (origin-m.PrimaryPart.Position).Magnitude<=config.radius then mode='field' end
-            if mode and eligibleSelection(mode,m) then
-                local rank=mode=='world' and 0 or mode=='stage' and 1 or 2
-                table.insert(candidates,{m=m,mode=mode,rank=rank,dist=dist})
-            end
-        end
-    end
-    table.sort(candidates,function(a,b)
-        if a.rank~=b.rank then return a.rank<b.rank end
-        -- Stay on the current selected monster until it dies.
-        if a.m==movementRuntime.lock then return true elseif b.m==movementRuntime.lock then return false end
-        return a.dist<b.dist
-    end)
-    local c=candidates[1];if c then return c.m,c.mode=='world',c.mode end
-end
-local function farmPosition(part,m,settings)
-    local gap=settings.distance
-    local radius=m:GetAttribute('Radius') or 2
-    local height=(m:GetAttribute('Height') or part.Size.Y)/2
-    local direction=part.CFrame.LookVector
-    direction=Vector3.new(direction.X,0,direction.Z)
-    direction=direction.Magnitude>.01 and direction.Unit or Vector3.new(0,0,-1)
-    if settings.side=='Front' then return part.Position+direction*(radius+gap) end
-    if settings.side=='Behind' then return part.Position-direction*(radius+gap) end
-    return part.Position+Vector3.new(0,(settings.side=='Above' and 1 or -1)*(height+gap),0)
-end
-local tactics={}
-do
-    local classes=require(bounded(shared.Config,'Classes'))
-    local casts={}
-    local moveController=require(bounded(controllers,'MoveController'))
-    local lastNativeDodge=-math.huge
-    local tracked,lastHealth,lastProgress,attempts=nil,nil,0,0
-    local dodging=false
-    local chosenDodge=nil
-    movementRuntime.skip={}
-    label(farm,'-- Smart Farming (experimental) --')
-    toggle(farm,'smartDistance','Smart Distance (ground / weapon range)')
-    toggle(farm,'autoDodge','Auto Dodge supported boss warnings')
-    toggle(farm,'towerFastDodge','Tower Fast Dodge (reposition instead of walking)')
-    toggle(farm,'stuckRecovery','Stuck Recovery (no target HP loss)')
-    label(farm,'No progress timeout (3-60 seconds)')
-    local timeout=input(farm,tostring(config.stuckSeconds))
-    connect(timeout.FocusLost,guard(function() local n=tonumber(timeout.Text);assert(n and n>=3 and n<=60,'Timeout must be 3-60');config.stuckSeconds=n end))
-    table.insert(refreshers,function() timeout.Text=tostring(config.stuckSeconds) end)
-    local display=label(farm,'Smart Farming: Off')
-    local function safeGap(weapon,monster,leash)
-        local maximum=math.max(.5,math.min(weapon-.75,leash-5))
-        local minimum=monster+1.5
-        return math.min(maximum,minimum),minimum<=maximum
-    end
-    local function shapeDanger(shape,point,padding)
-        if typeof(shape.center)~='Vector3' then return false end
-        local center=shape.center
-        if shape.follow then
-            local follow=Players:GetPlayerByUserId(shape.follow)
-            local char=follow and follow.Character;local r=char and char:FindFirstChild('HumanoidRootPart')
-            if r then center=r.Position end
-        end
-        local delta=point-center;delta=Vector3.new(delta.X,0,delta.Z)
-        if shape.kind=='safe' or shape.kind=='tower' or shape.kind=='arena' then return false end
-        if shape.kind=='line' then
-            if typeof(shape.dir)~='Vector3' or type(shape.length)~='number' or type(shape.width)~='number' then return false end
-            local dir=Vector3.new(shape.dir.X,0,shape.dir.Z)
-            if dir.Magnitude<.001 then return false end
-            dir=dir.Unit
-            local along=delta:Dot(dir)
-            local across=math.abs(delta:Dot(Vector3.new(-dir.Z,0,dir.X)))
-            return along>=-padding and along<=shape.length+padding and across<=shape.width/2+padding
-        end
-        if type(shape.radius)~='number' then return false end
-        local distance=delta.Magnitude
-        if shape.kind=='ring' then return distance>=math.max(0,(shape.inner or 0)-padding) and distance<=shape.radius+padding end
-        return distance<=shape.radius+padding
-    end
-    connect(bounded(bounded(RS,'Remotes'),'Effect').OnClientEvent,function(channel,payload)
-        if type(payload)~='table' then return end
-        if channel=='Dungeon' and (payload.kind=='floor' or payload.kind=='start' or payload.kind=='loading' or payload.kind=='cancel') then
-            casts={};chosenDodge=nil
-        end
-        if channel=='BossCancel' then casts[payload.id or 0]=nil;chosenDodge=nil end
-        if channel=='BossHit' then
-            if payload.shape=='puddles' and type(payload.shapes)=='table' then
-                casts['puddle:'..tostring(payload.id or os.clock())]={payload=payload,expires=os.clock()+math.min(60,math.max(0,tonumber(payload.duration) or 5))}
-            end
-            -- Keep cast geometry briefly after impact; do not return into its hit window.
-            local active=casts[payload.id or 0]
-            if active then active.expires=math.max(active.expires,os.clock()+.5) end
-            chosenDodge=nil
-        end
-        if channel=='BossCast' and config.autoDodge and type(payload.windup)=='number' and type(payload.shapes)=='table' then
-            casts[payload.id or 0]={payload=payload,expires=os.clock()+math.max(0,payload.windup)+.7}
-            chosenDodge=nil
-        end
-    end)
-    local function danger(point)
-        local unsafe=false
-        for id,cast in pairs(casts) do
-            if cast.expires<os.clock() then casts[id]=nil else
-                local mechanic=cast.payload.shape
-                local safeNeeded=mechanic=='shelter' or mechanic=='towers' or mechanic=='stack'
-                local insideSafe=false
-                for _,shape in ipairs(cast.payload.shapes) do
-                    if (shape.kind=='safe' or shape.kind=='tower' or mechanic=='stack') and typeof(shape.center)=='Vector3' and type(shape.radius)=='number' then
-                        local d=point-shape.center
-                        if Vector3.new(d.X,0,d.Z).Magnitude<math.max(.5,shape.radius-1.5) then insideSafe=true end
-                    elseif shapeDanger(shape,point,2) then unsafe=true end
-                end
-                if safeNeeded and not insideSafe then unsafe=true end
-            end
-        end
-        return unsafe
-    end
-    local function ground(point,r,h,m)
-        local params=RaycastParams.new();params.FilterType=Enum.RaycastFilterType.Exclude
-        local excluded={player.Character,workspace:FindFirstChild('Monsters'),workspace:FindFirstChild('BossFx')}
-        local filtered={};for _,v in pairs(excluded) do if v then table.insert(filtered,v) end end
-        params.FilterDescendantsInstances=filtered
-        local hit=workspace:Raycast(point+Vector3.new(0,15,0),Vector3.new(0,-60,0),params)
-        if not hit or hit.Normal.Y<.6 then return nil end
-        local position=Vector3.new(point.X,hit.Position.Y+h.HipHeight+r.Size.Y/2,point.Z)
-        local definition=defs[m:GetAttribute('MonsterId') or '']
-        local center=m:GetAttribute('ArenaCenter') or m.PrimaryPart.Position
-        local leash=m:GetAttribute('ArenaRadius') or (definition and definition.leash) or 50
-        if typeof(center)~='Vector3' or type(leash)~='number' then return nil end
-        local d=position-center
-        if Vector3.new(d.X,0,d.Z).Magnitude>math.max(4,leash-4) then return nil end
-        return position
-    end
-    function tactics.smart(r,h,m,preferred)
-        if not config.smartDistance then return preferred end
-        local class=classes.defs[player:GetAttribute('Class') or '']
-        local definition=defs[m:GetAttribute('MonsterId') or '']
-        local gap,separated=safeGap(class and class.attackRange or 5,definition and definition.attackRange or 3,definition and definition.leash or 50)
-        local offset=preferred-m.PrimaryPart.Position;offset=Vector3.new(offset.X,0,offset.Z)
-        if offset.Magnitude<.01 then offset=r.Position-m.PrimaryPart.Position;offset=Vector3.new(offset.X,0,offset.Z) end
-        local dir=offset.Magnitude>.01 and offset.Unit or Vector3.new(0,0,1)
-        local desired=m.PrimaryPart.Position+dir*((m:GetAttribute('Radius') or 2)+gap)
-        display.Text=separated and 'Smart Distance: outside basic monster reach' or 'Smart Distance: weapon too short for a safe gap'
-        return ground(desired,r,h,m) or preferred
-    end
-    function tactics.dodge(r,h,m)
-        local now=os.clock()
-        if config.autoDodge then
-            local threatened=danger(r.Position)
-            if threatened or (dodging and next(casts)~=nil) then
-                if not chosenDodge or danger(chosenDodge) then
-                    local candidates={}
-                    for _,cast in pairs(casts) do for _,shape in ipairs(cast.payload.shapes) do
-                        if (shape.kind=='safe' or shape.kind=='tower' or cast.payload.shape=='stack') and typeof(shape.center)=='Vector3' then table.insert(candidates,shape.center) end
-                    end end
-                    for _,distance in ipairs({5,10,16,24}) do for i=0,15 do local angle=i*math.pi/8;table.insert(candidates,r.Position+Vector3.new(math.cos(angle)*distance,0,math.sin(angle)*distance)) end end
-                    local best,cost=nil,math.huge
-                    for _,candidate in ipairs(candidates) do
-                        local position=not danger(candidate) and ground(candidate,r,h,m) or nil
-                        if position and not danger(position) and (position-r.Position).Magnitude<cost then best=position;cost=(position-r.Position).Magnitude end
-                    end
-                    chosenDodge=best
-                end
-                if chosenDodge then
-                    if not dodging then target.setAuto(false);target.set(nil);movementRuntime.release() end
-                    dodging=true;tactics.busy=true
-                    if config.towerFastDodge and player:GetAttribute('TowerFloor') then
-                        if (r.Position-chosenDodge).Magnitude>1 then
-                            r.CFrame=CFrame.new(chosenDodge)*r.CFrame.Rotation
-                            r.AssemblyLinearVelocity=Vector3.new();r.AssemblyAngularVelocity=Vector3.new()
-                        end
-                        h:MoveTo(chosenDodge)
-                        display.Text='Tower Dodge: reposition / hold safe point'
-                    else
-                        local delta=chosenDodge-r.Position
-                        h:MoveTo(chosenDodge)
-                        if delta.Magnitude>5 and now-lastNativeDodge>=.95 then
-                            h:Move(Vector3.new(delta.X,0,delta.Z).Unit)
-                            moveController.dodge();lastNativeDodge=now
-                        end
-                        display.Text='Auto Dodge: movement + native dodge'
-                    end
-                    lastProgress=now;return true
-                end
-                display.Text='Auto Dodge: no safe ground candidate'
-            elseif dodging then
-                dodging=false;chosenDodge=nil;lastProgress=now
-                tactics.resumeRequested=true
-            end
-        elseif dodging then dodging=false;chosenDodge=nil;casts={};tactics.resumeRequested=true end
-        tactics.busy=dodging
-        return dodging
-    end
-    function tactics.step(r,h,m)
-        tactics.lastMonster=m
-        if tactics.dodge(r,h,m) then return true end
-        local now=os.clock()
-        if not config.stuckRecovery then tracked=nil;return false end
-        local health=m:GetAttribute('Health') or 0
-        if tracked~=m then tracked=m;lastHealth=health;lastProgress=now;attempts=0;return false end
-        if lastHealth and health<lastHealth then lastProgress=now;attempts=0 end
-        lastHealth=health
-        if now-lastProgress<config.stuckSeconds then return false end
-        lastProgress=now
-        if m:GetAttribute('Shielded') then attempts=0;display.Text='Recovery: waiting for shield phase';return false end
-        attempts=attempts+1
-        if attempts>2 then
-            movementRuntime.skip[m]=now+15;movementRuntime.release();target.setAuto(false);target.set(nil)
-            display.Text='Recovery: skip unresponsive target for 15s';return true
-        end
-        local relative=r.Position-m.PrimaryPart.Position;relative=Vector3.new(relative.X,0,relative.Z)
-        local direction=relative.Magnitude>.01 and relative.Unit or Vector3.new(0,0,1)
-        local desired=m.PrimaryPart.Position+Vector3.new(-direction.Z,0,direction.X)*math.max(4,relative.Magnitude)
-        local position=ground(desired,r,h,m)
-        if position and not danger(position) then
-            target.setAuto(false);movementRuntime.release()
-            r.CFrame=CFrame.lookAt(position,m.PrimaryPart.Position);r.AssemblyLinearVelocity=Vector3.new();h:MoveTo(position)
-            movementRuntime.offset=position-m.PrimaryPart.Position
-            movementRuntime.recoveryPoint={monster=m,position=position,expires=now+2}
-            display.Text='Recovery: reposition attempt '..attempts
-            return true
-        end
-        display.Text='Recovery: no valid reposition ground';return false
-    end
-end
-
 local function chestPrompt(r)
     if not config.chest or player:GetAttribute('DungeonChest')~=true or not player:GetAttribute('DungeonRun') then return end
     local best,dist=nil,math.huge
+    local area=chestZones.dungeonAt(r.Position,8)
     for _,p in ipairs(workspace:GetDescendants()) do
         if p:IsA('ProximityPrompt') and p.Enabled then
-            local text=(p.Name..' '..p.ActionText..' '..p.ObjectText..' '..(p.Parent and p.Parent.Name or '')):lower()
+            local names={p.Name,p.ActionText,p.ObjectText}
+            local node=p.Parent
+            for i=1,3 do if node then table.insert(names,node.Name);node=node.Parent end end
+            local text=table.concat(names,' '):lower()
             local match=config.prompt=='Auto' and (text:find('chest',1,true) or text:find('กล่อง',1,true)) or config.prompt~='Auto' and promptKey(p)==config.prompt
             local part=p.Parent
             local pos=part and (part:IsA('Attachment') and part.WorldPosition or part:IsA('BasePart') and part.Position)
             if not pos and part and part:IsA('Model') then pos=part:GetPivot().Position end
-            -- Only approach nearby chest prompts while this player's chest phase is active.
-            if match and pos and (r.Position-pos).Magnitude<dist and (r.Position-pos).Magnitude<250 then best={prompt=p,pos=pos};dist=(r.Position-pos).Magnitude end
+            if match and pos then
+                local delta=r.Position-pos;local distance=delta.Magnitude
+                local chestArea=chestZones.dungeonAt(pos,8)
+                if distance<dist and chestCandidateAllowed(distance,delta.Y,area~=nil and area==chestArea,area~=nil and chestArea~=nil) then
+                    best={prompt=p,pos=pos};dist=distance
+                end
+            end
         end
     end
     return best
@@ -1404,121 +1217,38 @@ local function stepReplay()
     return true
 end
 
-local function keepAutoTarget(controller,monster)
-    if controller.current~=monster then controller.set(monster) end
-    if not controller.auto then controller.setAuto(true) end
-    -- setAuto may let the game's selector choose another monster; restore our choice.
-    if controller.current~=monster then controller.set(monster) end
-end
-local lastTarget,wasWorld,returnCF=nil,false,nil
-local lastMovementMode=nil
 local lastChest=0
--- Do not run the built-in auto selector simultaneously: it can replace our boss target.
-local ownsTarget=false
-local function clearTarget()
-    tactics.lastMonster=nil
-    movementRuntime.release();movementRuntime.lock=nil;lastMovementMode=nil
-    if ownsTarget then
-        target.setAuto(false);target.set(nil);ownsTarget=false
-        local r,h=root();if r then h:MoveTo(r.Position) end
-    end
-    lastTarget=nil
-end
-do
-    local elapsed=0
-    connect(game:GetService('RunService').Heartbeat,function(dt)
-        elapsed=elapsed+dt;if elapsed<.05 then return end;elapsed=0
-        if not running or not config.autoDodge then return end
-        local r,h=root();local m=tactics.lastMonster or movementRuntime.lock or target.current
-        if not r or not alive(m) then return end
-        local ok,active=pcall(tactics.dodge,r,h,m)
-        if ok and active then lastTarget=nil;lastMovementMode=nil end
-        if not ok then say('Auto Dodge error: '..tostring(active)) end
-    end)
-end
 task.spawn(function()
     while running do
         local ok,e=pcall(function()
             sessionStep()
-            if stepRespawn() then movementRuntime.release();return end
+            if player:GetAttribute('Previewing')==true then
+                dungeonAuto.stop();chestWalk.cancel();say('Dungeon automation paused while game preview is open');return
+            end
+            if stepRespawn() then chestWalk.cancel();dungeonAuto.stop();return end
             stepKeys()
             stepPotion()
-            if stepReplay() then movementRuntime.release();return end
+            if stepReplay() then chestWalk.cancel();dungeonAuto.stop();return end
             stepEnter()
-            local r,h=root();if not r then releasePrompt();return end
+            local r,h=root();if not r then chestWalk.cancel();releasePrompt();dungeonAuto.stop();return end
             local chest=chestPrompt(r)
-            if chest and os.clock()-lastChest>3 then
-                clearTarget();releasePrompt();say('Opening dungeon chest...')
-                r.CFrame=CFrame.new(chest.pos+Vector3.new(0,0,2));h:MoveTo(r.Position)
-                task.wait(.3)
+            if chest then
+                dungeonAuto.stop()
+                if os.clock()-lastChest<=3 then return end
+                if not chestWalk.step(chest,r,h) then return end
+                releasePrompt();say('Holding to open boss chest...')
                 if not running or not config.chest or not chest.prompt.Parent or player:GetAttribute('DungeonChest')~=true then return end
+                if not chestInReach((r.Position-chest.pos).Magnitude,chest.prompt.MaxActivationDistance) then return end
                 activePrompt=chest.prompt;activePrompt:InputHoldBegin()
                 local deadline=os.clock()+activePrompt.HoldDuration+.15
-                while running and config.chest and activePrompt and activePrompt.Parent and os.clock()<deadline do task.wait(.05) end
+                while running and config.chest and activePrompt and activePrompt.Parent and h.Health>0 and os.clock()<deadline do
+                    if not chestInReach((r.Position-chest.pos).Magnitude,activePrompt.MaxActivationDistance) then break end
+                    task.wait(.05)
+                end
                 releasePrompt();lastChest=os.clock();return
             end
-            local m,isWorld,mode=choose(r)
-            local worldState=RS:GetAttribute('WorldBoss')
-            local approaching=config.world and not player:GetAttribute('DungeonRun') and (worldState=='soon' or (RS:GetAttribute('WorldBossEnds') or 0)>workspace:GetServerTimeNow())
-            if wasWorld and not isWorld and not approaching then
-                clearTarget()
-                if config.returnHome and returnCF and not player:GetAttribute('DungeonRun') then r.CFrame=returnCF end
-                wasWorld=false;returnCF=nil
-            end
-            if not m then
-                clearTarget()
-                if config.world and not player:GetAttribute('DungeonRun') then
-                    local landing=RS:GetAttribute('WorldBossLanding')
-                    local state=RS:GetAttribute('WorldBoss')
-                    if (state=='soon' or (RS:GetAttribute('WorldBossEnds') or 0)>workspace:GetServerTimeNow()) and typeof(landing)=='Vector3' then
-                        if not wasWorld then returnCF=config.position and CFrame.new(table.unpack(config.position.cf)) or r.CFrame;wasWorld=true end
-                        h:MoveTo(landing);say('Approaching World Boss landing');return
-                    end
-                    local at=RS:GetAttribute('WorldBossAt');local seconds=type(at)=='number' and math.max(0,math.ceil(at-workspace:GetServerTimeNow())) or nil
-                    say(seconds and ('Waiting World Boss: '..seconds..'s') or 'Waiting for boss / replicated spawn')
-                end
-                return
-            end
-            if isWorld and not wasWorld then returnCF=config.position and CFrame.new(table.unpack(config.position.cf)) or r.CFrame;wasWorld=true end
-            if tactics.step(r,h,m) then lastTarget=nil;lastMovementMode=nil;return end
-            movementRuntime.lock=m
-            local movement=config.movement[mode]
-            if movement and movement.enabled then
-                local movementKey=mode..movement.side..tostring(movement.distance)..tostring(config.smartDistance)
-                if movementRuntime.monster~=m or movementRuntime.key~=movementKey then
-                    movementRuntime.offset=farmPosition(m.PrimaryPart,m,movement)-m.PrimaryPart.Position
-                    movementRuntime.monster=m;movementRuntime.key=movementKey
-                end
-                local position=tactics.smart(r,h,m,m.PrimaryPart.Position+movementRuntime.offset)
-                local recovery=movementRuntime.recoveryPoint
-                if recovery and recovery.monster==m and recovery.expires>os.clock() then position=recovery.position end
-                if lastTarget~=m or lastMovementMode~=mode then
-                    -- R is wired to TargetController.setAuto(not auto) in CombatController.
-                    -- Set explicit states to avoid toggling in the wrong direction.
-                    target.setAuto(false);movementRuntime.release()
-                    task.wait(.05)
-                    if not running or not alive(m) then return end
-                    r.CFrame=CFrame.lookAt(position,m.PrimaryPart.Position)
-                    h:MoveTo(position)
-                    keepAutoTarget(target,m)
-                    lastTarget=m;lastMovementMode=mode;ownsTarget=true
-                else keepAutoTarget(target,m) end
-                tactics.resumeRequested=false
-                movementRuntime.hold(r,h,position,m.PrimaryPart)
-            else
-                movementRuntime.release();movementRuntime.lock=nil;lastMovementMode=nil
-                keepAutoTarget(target,m)
-                tactics.resumeRequested=false
-                lastTarget=m;ownsTarget=true
-                local pos=m.PrimaryPart.Position
-                local radiusValue=m:GetAttribute('Radius') or 2
-                local delta=r.Position-pos;local flat=Vector3.new(delta.X,0,delta.Z)
-                local dir=flat.Magnitude>.01 and flat.Unit or Vector3.new(0,0,1)
-                if config.smartDistance then h:MoveTo(tactics.smart(r,h,m,pos+dir*(radiusValue+2)))
-                elseif delta.Magnitude>radiusValue+5 then h:MoveTo(pos+dir*(radiusValue+2)) else h:MoveTo(r.Position) end
-            end
-            if config.skills then for slot=1,4 do combat.useSkill(slot,true) end end
-            say((mode..': ')..tostring(m:GetAttribute('MonsterId') or m.Name)..' | HP '..tostring(m:GetAttribute('Health')))
+            chestWalk.cancel()
+            dungeonAuto.step()
         end)
         if not ok then releasePrompt();say('Runtime error: '..tostring(e));task.wait(1) end
         task.wait(.25)
